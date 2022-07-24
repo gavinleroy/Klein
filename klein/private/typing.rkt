@@ -2,12 +2,12 @@
 
 (require (for-syntax racket/base
                      syntax/parse)
-         racket/set
-         racket/bool
+         racket/contract
+         racket/function
          racket/list
          racket/match
-         racket/function
-         racket/contract
+         racket/set
+         racket/struct
 
          ;; TODO get rid of the monadic interface and use macros instead. Use of
          ;; macros wil also gain you syntax highlighting + many other things in DrRacket.
@@ -25,68 +25,173 @@
 ;; A Star kind represents nullary (simple) types. E.g. Int, FLoat, Char, ...
 ;; A KFun represents a type constructor from k1 -> k2
 (struct kind ())
-(struct %#kind-star kind () #:sealed)
-(struct kind-fun kind (k1  k2) #:sealed)
+(struct %#kind-star kind ()
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'StarK)
+      (lambda (o) '())))])
+(struct kind-fun kind (k1  k2)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'ArrowK)
+      (lambda (o) (list (kind-fun-k1 o)
+                   (kind-fun-k2 o)))))])
 ;; Only one Star kind is required
 (define kind-star (%#kind-star))
 (define (kind-star? s)
   (eq? s kind-star))
 
 (struct type ())
-(struct type-variable type (id k) #:sealed)
-(struct type-const type (id k) #:sealed)
-(struct type-app type (t1 t2) #:sealed)
-(struct type-gen type (hsh) #:sealed)
+(struct type-variable type (id k)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'VarT)
+      (lambda (o) (list (type-variable-id o)
+                   (type-variable-k o)))))])
+
+(struct type-const type (id k)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'ConstT)
+      (lambda (o) (list (type-const-id o)
+                   (type-const-k o)))))])
+(struct type-app type (t1 t2)
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'AppT)
+      (lambda (o) (list (type-app-t1 o)
+                   (type-app-t2 o)))))])
+(struct type-gen type (hsh)
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'GenT)
+      (lambda (o) (list (type-gen-hsh o)))))])
+
 ;; Representation of a `qualified` type. The head represents a type? that must
 ;; fulfil the list of predicates.
-(struct qualified type (predicates #;predicate? head #;type?))
+(struct qualified type (predicates head)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'Qualified)
+      (lambda (o) (list (qualified-predicates o)
+                   (qualified-head)))))])
 (define (qualified/c t?)
   (and/c qualified? (compose t? qualified-head)))
 
 ;; A predicate of the form id t states that type? `t` is a member of class `id`.
-(struct predicate type (id t #;type?))
+(struct predicate type (id t #;type?)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'Predicate)
+      (lambda (o) (list (predicate-t o)
+                   (predicate-id o)))))])
+
 ;; A type scheme relates all universally quantified  variables in the qualified
 ;; types with a kind in `kinds`. These variables are ordered and the nth
 ;; variables has type scheme `(list-ref kinds n)`.
-(struct scheme type (kinds #;(listof kind)
-                     qs #;qualified?) #:sealed)
-(struct tclass type (ids ints) #:sealed)
-(struct assumption type (id scheme))
+(struct scheme type (kinds qs)
+  #:transparent
+  #:sealed)
+
+(struct tclass type (ids ints)
+  #:transparent
+  #:sealed)
+
+(struct assumption type (id scheme)
+  #:transparent
+  #:sealed)
 
 ;; Class environments partially map ids to class values.
-(struct tclass-env (classes #;(id? . -> . (option/c tclass?))
-                    defaults #;(listof type?)))
+(struct tclass-env (classes defaults))
 
 ;; TODO expressions are currently a subset of what should be available in Klein.
 (struct expression ())
-(struct expr-var expression (id) #:sealed)
-(struct expr-lit expression (lit) #:sealed)
-(struct expr-const expression (assumpt) #:sealed)
-(struct expr-app expression (e1 e2) #:sealed)
-(struct expr-let expression (bg e) #:sealed)
+(struct expr-var expression (id)
+  #:transparent
+  #:sealed)
+
+(struct expr-lit expression (lit)
+  #:transparent
+  #:sealed)
+
+(struct expr-const expression (assumpt)
+  #:transparent
+  #:sealed)
+
+(struct expr-app expression (e1 e2)
+  #:transparent
+  #:sealed)
+
+(struct expr-let expression (bg e)
+  #:transparent
+  #:sealed)
 
 ;; Patterns may occur on the left hand side of a function declaration. Here,
 ;; values may be destructured.
 ;; TODO support the full slew of patterns.
 (struct pattern ())
-(struct pat-id pattern (id) #:sealed)
+(struct pat-id pattern (id)
+  #:transparent
+  #:sealed)
 
 ;; An alternative is used to bind a list of function binding patterns (left hand sides)
 ;; to a cooresponding body expression (right hand side).
-(struct alternative (pats expr) #:sealed)
+(struct alternative (pats expr)
+  #:transparent
+  #:sealed)
 
+(struct bind-group (expls impls))
 ;; For a given list of explicit bindings,
 ;;
 ;; Example: given a group of explicitly typed bindings `es`, impls would be a
 ;; list of implicitly typed bindings of the form `im_0, im_1, ..., im_n`. An
 ;; implicit bindings `im_i` should only depend on those bindings in es or `im_j`
 ;; such that `0 <= j && j < i`.
-(struct bg-explicit (id scm alts))
-(struct bg-implicit (id alts))
+(struct bg-explicit (id scm alts)
+  #:transparent
+  #:sealed)
 
-(struct bind-group (expls impls))
+#;(define explicit/c
+  (struct/dc bg-explicit
+             [id ...]
+             [scm ...]
+             [alts ...]))
 
-(struct ambiguity (tv ps))
+(struct bg-implicit (id alts)
+  #:transparent
+  #:sealed)
+
+(define implicit/c
+  (struct/dc bg-implicit
+             [id string?]
+             [alts (listof alternative?)]))
+
+
+(struct ambiguity (tv ps)
+  #:transparent
+  #:sealed)
 
 ;; Contract for results that could fail, all results must include a message
 ;; describing why the computation failed. This probably should be augmented in
@@ -96,70 +201,77 @@
 (define subst/c (listof pair?))
 
 ;; Type Inference monad for passing state (currently a single substitution TODO)
+;; TI also embeds a result (failure / success) to signify type checking
+;; errors.
 (struct TI (proc)
   #:transparent
+  #:sealed
   #:methods df:gen:functor
   [(define (map f x)
      (TI (lambda (s)
-           ;; (match-define (cons s v) ((TI-proc x) s))
            (define t ((TI-proc x) s))
-           (cons (car t) (f (cdr t))))))]
+           (cons (car t) (df:map f (cdr t))))))]
   #:methods da:gen:applicative
   [(define (pure _ x) (->TI x))
    (define (apply f xs)
      (do [g <- f]
          [args <- (map/m values xs)]
-       (->TI (r:apply g args))))]
+         (->TI (r:apply g args))))]
   #:methods gen:monad
   [(define (chain f x)
      (TI (lambda (s)
            (match-define (TI fx) x)
-           (match-define (cons st v) (fx s))
-           (match-define (TI fg) (f v))
-           (fg st))))])
+           (match (fx s)
+             [(cons st (success v))
+              (match-let ([(TI fg) (f v)])
+                (fg st))]
+             [oth oth]))))])
 
 ;; Helpers for working with a Type Inference state
-(define (->TI x) (TI (lambda (s) (cons s x))))
-(define (get-state) (TI (lambda (s) (cons s s))))
-(define/contract (run-ti ti)
-  (TI? . -> . any/c)
+(define (->TI x) (TI (lambda (s) (cons s (success x)))))
+(define (get-state) (TI (lambda (s) (cons s (success s)))))
+(define/contract (<-TI ti)
+  (TI? . -> . (result/c any/c))
   (match-define (TI f) ti)
   (cdr (f empty-subst)))
 (define/contract (ext-state sp)
   (subst/c . -> . TI?)
-  (TI (lambda (s) (cons (sp . @@ . s) 'dummy))))
+  (TI (lambda (s) (cons (sp . @@ . s) (success 'dummy)))))
+(define/contract (fail/m msg)
+  (string? . -> . TI?)
+  (TI (lambda (s) (cons s (failure msg)))))
 (define-syntax (sequence/m stx)
   (syntax-case stx ()
     [(_ f ms ...)
      #'(map/m (curry apply f) (map list ms ...))]))
 
 (module+ test
-  (define (push-state e) (TI (lambda (s) (cons (cons e s) (void)))))
-  (define (run-state ti) (car ((TI-proc ti) empty-subst)))
-  (define (%add x y) (TI (lambda (s) (cons s (+ x y)))))
-  #;(define (double x)
-      (do [y <- (%add x x)]
-          (return-ti y y)))
-  #;(define (quadruple x)
-      (do [(TI<- y y) <- (double x)]
-          [(TI<- z z) <- (double y)]
-        (return-ti z z z z)))
-  (check-equal? (run-ti (->TI 0)) 0)
-  (check-equal? (run-ti (df:map (compose add1 add1) (->TI 0))) 2)
-  (check-equal? (run-ti ((->TI identity) (->TI 0))) 0)
-  (check-equal? (run-ti ((->TI add1) (->TI 0))) 1)
-  (check-equal? (run-ti (((->TI compose) (->TI add1) (->TI add1)) (->TI 0))) 2)
-  (check-equal? (run-state
-                 (do (->TI 0)
-                     (push-state 0)
-                   (push-state 1)
-                   (push-state 2)
-                   (get-state))) '(2 1 0))
-  (check-equal? (run-ti (sequence/m %add '(1 2 3) '(3 2 1)))
-                '(4 4 4))
-  #;(check-equal? (run-ti
-                   (do [(TI<- a b c d) <- (quadruple 2)]
-                       (return-ti (= 8 a b c d)))) #true))
+  (define-syntax (check-success? stx)
+    (syntax-parse stx
+      [(_ f:expr s:expr) #'(check-equal? f (success s))]))
+  (define-syntax (check-fail? stx)
+    (syntax-parse stx
+      [(_ f:expr) #'(let ([v f]) (check-pred failure? v))]))
+
+  (define (push-state e) (TI (lambda (s) (cons (cons e s) (success (void))))))
+  (define (%add x y) (->TI (+ x y)))
+
+  (check-success? (<-TI (->TI 0)) 0)
+  (check-success? (<-TI (df:map (compose add1 add1) (->TI 0))) 2)
+  (check-success? (<-TI ((->TI identity) (->TI 0))) 0)
+  (check-success? (<-TI ((->TI add1) (->TI 0))) 1)
+  (check-success? (<-TI (((->TI compose) (->TI add1) (->TI add1)) (->TI 0))) 2)
+  (check-success? (<-TI (do (->TI 0)
+                            (push-state 0)
+                            (push-state 1)
+                            (push-state 2)
+                            (get-state))) '(2 1 0))
+  (check-success? (<-TI (sequence/m %add '(1 2 3) '(3 2 1)))
+                  '(4 4 4))
+  (check-fail? (<-TI (do [x <- (->TI 0)]
+                         [y <- (%add x x)]
+                         [z <- (fail/m "whoops!")]
+                         (%add z y)))))
 
 ;; ;; -------------------------
 
@@ -224,13 +336,13 @@
                 [(type-variable _ _)
                  (match (assoc t sub)
                    [#false t]
-                   [ty ty])]
+                   [(cons _ ty) ty])]
                 [(type-app t1 t2) (type-app (substitute sub t1)
                                             (substitute sub t2))]
                 [(qualified ps head)
                  (qualified (substitute sub ps)
                             (substitute sub head))]
-                [(predicate i t) (predicate i (substitute i t))]
+                [(predicate i t) (predicate i (substitute sub t))]
                 [(scheme ks qt) (scheme ks (substitute sub qt))]
                 [(assumption i ts) (assumption i (substitute sub ts))]
                 [else t])]))
@@ -238,17 +350,17 @@
 (define/contract (get-type-vars t0)
   ((or/c (listof type?) type?) . -> . (listof type?))
   (define (tv t)
-    (cond [(list? t) (apply set-union (map tv t))]
+    (cond [(list? t) (apply list-union (map tv t))]
           [else (match t
-                  [(type-variable _ _) (set t)]
-                  [(type-app l r) (set-union (tv l) (tv r))]
-                  [(qualified ps head) (set-union (tv ps)
-                                                  (tv head))]
+                  [(type-variable _ _) (list t)]
+                  [(type-app l r) (list-union (tv l) (tv r))]
+                  [(qualified ps head) (list-union (tv ps)
+                                                   (tv head))]
                   [(predicate _ t) (tv t)]
                   [(scheme _ qt) (tv qt)]
                   [(assumption _ ts) (tv ts)]
-                  [else (set)])]))
-  (set->list (tv t0)))
+                  [else (list)])]))
+  (tv t0))
 
 ;; @@ is the infix operator for substitution composition
 (define/contract (@@ s1 s2)
@@ -265,7 +377,7 @@
     (set->list (set-intersect (list->set l1)
                               (list->set l2))))
   (let ([agreeable (andmap (lambda (v) (equal? (substitute s1 v)
-                                          (substitute s2 v)))
+                                               (substitute s2 v)))
                            (list-intersect (heads s1) (heads s2)))])
     (if agreeable
         (success (append s1 s2))
@@ -282,7 +394,7 @@
     [(cons (type-app ll rl) (type-app lr rr))
      (do [s1 <- (most-general-unifier ll lr)]
          [s2 <- (most-general-unifier lr rr)]
-         (success (s2 . @@ . s1)))]
+       (success (s2 . @@ . s1)))]
     [(cons u t)
      #:when (type-variable? u)
      (bind-variable u t)]
@@ -315,7 +427,7 @@
     [(cons (type-app ll rl) (type-app lr rr))
      (do [le <- (type-match ll lr)]
          [re <- (type-match lr rr)]
-         (merge le re))]
+       (merge le re))]
     [(cons u t)
      #:when (and (type-variable? u)
                  (equal? (get-kind u) (get-kind t)))
@@ -327,15 +439,17 @@
 
 ;; Class environemnts
 
-(define (env-super env i)
+(define/contract (env-super env i)
+  (tclass-env? string? . -> . (result/c (listof string?)))
   (match ((tclass-env-classes env) i)
     [(success (tclass ids _)) ids]
-    [else (error "internal error, no super found")]))
+    [else '()]))
 
-(define (env-insts env i)
+(define/contract (env-insts env i)
+  (tclass-env? string? . -> . (listof (qualified/c predicate?)))
   (match ((tclass-env-classes env) i)
     [(success (tclass _ is)) is]
-    [else (error "internal error, no instances found")]))
+    [else '()]))
 
 (define/contract (defined? m)
   ((either/c any/c any/c) . -> . boolean?)
@@ -358,16 +472,16 @@
 (define/contract (<:> f g)
   (env->env/c env->env/c . -> . env->env/c)
   (lambda (env) (do [envp <- (f env)]
-               (g envp))))
+                    (g envp))))
 
 (define/contract (env-add-class i is)
   (string? (listof string?) . -> . env->env/c)
   (lambda (env) (cond [(defined? (tclass-env-classes env i))
-                  (failure "class is already defined")]
-                 [(ormap (compose not defined? (curry tclass-env-classes env))
-                         is)
-                  (failure "superclass is not defined")]
-                 [else (success (env-bind env i (tclass is '())))])))
+                       (failure "class is already defined")]
+                      [(ormap (compose not defined? (curry tclass-env-classes env))
+                              is)
+                       (failure "superclass is not defined")]
+                      [else (success (env-bind env i (tclass is '())))])))
 
 (define/contract (env-add-inst ps p env)
   ((listof predicate?) predicate? tclass-env? . -> . (result/c tclass-env?))
@@ -378,7 +492,8 @@
                (match-let ([(qualified _ q) qd]) q)))
   (define c (tclass (env-super env i)
                     (cons (qualified ps p) its)))
-  (cond [(not (defined? (tclass-env-classes env i))) (failure "no class for instance")]
+  (cond [(not (defined? (tclass-env-classes env i)))
+         (failure "no class for instance")]
         [(ormap (curry overlap? p) qs) (failure "")]
         [else (success (env-bind env i c))]))
 
@@ -426,13 +541,13 @@
   (r t))
 
 (define/contract (->head-normal-form env p)
-  (tclass-env? (or/c (listof predicate?) predicate?)
-               . -> . (result/c (listof predicate?)))
-  (cond [(list? p) (do [ps <- (map/m (curry ->head-normal-form env) p)]
-                       (success (apply append ps)))]
-        [(head-normal-form? p) (list p)]
+  (tclass-env? (or/c (listof predicate?) predicate?) . -> . TI?)
+  (cond [(list? p)
+         (do [ps <- (map/m (curry ->head-normal-form env) p)]
+             (->TI (apply append ps)))]
+        [(head-normal-form? p) (->TI (list p))]
         [else (match (by-inst env p)
-                [(failure _) (failure "context reduction")]
+                [(failure _) (fail/m "context reduction")]
                 [(success ps) (->head-normal-form env ps)])]))
 
 (define/contract (simplify env ps)
@@ -447,9 +562,9 @@
   (loop '() ps))
 
 (define/contract (reduce env ps)
-  (tclass-env? (listof predicate?) . -> . (result/c (listof predicate?)))
+  (tclass-env? (listof predicate?) . -> . TI?)
   (do [qs <- (->head-normal-form env ps)]
-      (success (simplify env qs))))
+      (->TI (simplify env qs))))
 
 (define/contract (quantify vs qt)
   ((listof type-variable?) (qualified/c type?) . -> . scheme?)
@@ -467,12 +582,12 @@
   (scheme '() (qualified '() t)))
 
 (define/contract (find-in-assumptions id as)
-  (string? (listof assumption?) . -> . (result/c scheme?))
+  (string? (listof assumption?) . -> . TI?)
   (match as
-    [(list) (failure "unbound identifier")]
+    [(list) (fail/m "unbound identifier")]
     [(list (assumption i ts) as ...)
      (if (equal? id i)
-         (success ts)
+         (->TI ts)
          (find-in-assumptions id as))]))
 
 (define/contract (unify t1 t2)
@@ -480,11 +595,11 @@
   (do [s <- (get-state)]
       [u <- (most-general-unifier (substitute s t1)
                                   (substitute s t2))]
-      (ext-state u)))
+    (ext-state u)))
 
 (define/contract (fresh-tv k)
   (kind? . -> . TI?)
-  (TI (lambda (s) (cons s (type-variable (genid) k)))))
+  (->TI (type-variable (genid) k)))
 
 (define/contract (fresh-inst tscm)
   (scheme? . -> . TI?)
@@ -524,11 +639,30 @@
         [(float? lit)
          (do [v <- (fresh-tv kind-star)]
              (->TI (cons (list (predicate "Fractional" v))  v)))]
-        #;[(string? lit) (values '() %list of %char)]))
+        #;[(string? lit) (values '() %list of %char)]
+        ;; NOTE this case shouldn't happen due to the contract,
+        ;; but I may change that before updating the match.
+        [else  (fail/m (format "unsupported literal: ~a" lit))]))
 
 (module+ test
-  (check-equal? (cdr (run-ti (ti-literal #\U))) %char)
-  #;(check-equal? (cdr (run-ti (ti-literal 100))) 'TODO))
+  (define (ti-value p)
+    (match p [(success (cons _ v)) (success v)] [o o]))
+  (define-syntax (check-relation? stx)
+    (syntax-parse stx
+      [(_ f:expr l:string)
+       #'(match-let ([(success (cons ps tv)) f])
+           (check-equal?
+            (let loop ([ps ps])
+              (cond [(null? ps) (fail)]
+                    [(equal? (predicate-t (car ps))
+                             tv) (predicate-id (car ps))]
+                    [else (loop (cdr ps))]))
+            l))]))
+
+  (check-success? (ti-value (<-TI (ti-literal #\U))) %char)
+  #;(check-fail? (<-TI (ti-literal "strings unsupported")))
+  (check-relation? (<-TI (ti-literal 100))
+                   "Numeric"))
 
 ;; TODO pattern inference all other variants
 (define/contract (ti-pattern p)
@@ -542,18 +676,18 @@
   ((listof pattern?) . -> . TI?)
   (do [psasts <- (map/m ti-pattern ps)]
       (define ps (apply append (map car psasts)))
-      (define as (apply append (map cadr psasts)))
-      (define ts (apply append (map cddr psasts)))
-      (->TI (cons ps (cons as ts)))))
+    (define as (apply append (map cadr psasts)))
+    (define ts (apply append (map cddr psasts)))
+    (->TI (cons ps (cons as ts)))))
 
-(define #;/contract (ti-expr env as e)
-  #;(tclass-env? (listof assumption?) expr? . -> . TI?)
+(define/contract (ti-expr env as e)
+  (tclass-env? (listof assumption?) expression? . -> . TI?)
   (define (return ss t) (->TI (cons ss t)))
   (match e
     [(expr-var i)
      (do [sc <- (find-in-assumptions i as)]
          [(qualified ps t) <- (fresh-inst sc)]
-         (return ps t))]
+       (return ps t))]
     [(expr-lit l) (ti-literal l)]
     [(expr-const (assumption id scm))
      (do [(qualified ps t) <- (fresh-inst scm)]
@@ -561,13 +695,43 @@
     [(expr-app e f)
      (do [(cons ps te) <- (ti-expr env as e)]
          [(cons qs tf) <- (ti-expr env as f)]
-         [t <- (fresh-tv kind-star)]
-         (unify ($make-func tf t) te)
-         (return (append ps qs) t))]
+       [t <- (fresh-tv kind-star)]
+       (unify ($make-func tf t) te)
+       (return (append ps qs) t))]
     [(expr-let bg e)
      (do [(cons ps asp) <- (ti-bind-group env as bg)]
          [(cons qs t) <- (ti-expr env (append asp as) e)]
-         (return (append ps qs) t))]))
+       (return (append ps qs) t))]))
+
+(module+ test
+  (check-success? (ti-value (<-TI (ti-expr empty-env '() (expr-lit #\U))))
+                  %char)
+  (check-fail? (ti-value (<-TI (ti-expr empty-env '() (expr-var "x")))))
+  (check-success?
+   (ti-value (<-TI (ti-expr empty-env
+                            (list (assumption "x" (type->scheme %int)))
+                            (expr-var "x")))) %int)
+  (check-fail? (<-TI
+                (ti-expr empty-env '()
+                         (expr-let (bind-group '()
+                                               '())
+                                   (expr-var "x")))))
+  (check-relation?
+   (<-TI (ti-expr empty-env '()
+                  (expr-let
+                   (bind-group
+                    '()
+                    (list (list (bg-implicit
+                                 "x"
+                                 (list (alternative
+                                        '()
+                                        (expr-lit 10)))))))
+                   (expr-var "x")))) "Numeric")
+  ;; Test for explicit binding with arithmetic
+  ;; Test with non-empty env
+  ;; Test for functions
+  ;; ...
+  )
 
 (define/contract (ti-alternative env as a)
   (tclass-env? (listof assumption?) alternative? . -> . TI?)
@@ -583,7 +747,7 @@
                (listof alternative?) type? . -> . TI?)
   (do [psts <- (map/m (curry ti-alternative env as) alts)]
       (map/m (curry unify t) (map cdr psts))
-      (->TI (apply append (map car psts)))))
+    (->TI (apply append (map car psts)))))
 
 (define/contract (split env fs gs ps)
   (tclass-env? (listof type-variable?)
@@ -594,8 +758,8 @@
       (define-values (ds rs)
         (partition (compose (curryr member fs)
                             get-type-vars) psp))
-      [rsp <- (default-predicates env (append fs gs) rs)]
-      (->TI (cons ds (list-diff rs rsp)))))
+    [rsp <- (default-predicates env (append fs gs) rs)]
+    (->TI (cons ds (list-diff rs rsp)))))
 
 (define/contract (ambiguities env vs ps)
   (tclass-env? (listof type-variable?)
@@ -615,14 +779,13 @@
   ;; https://web.cecs.pdx.edu/~mpj/thih/TypingHaskellInHaskell.html#Haskell98
   '())
 
-(define/contract (with-defaults f env vs ps)
-  (((listof ambiguity?) (listof type? . -> . any/c))
-                       tclass-env? (listof type-variable?)
-                       (listof predicate?)
-                       . -> . (result/c any/c))
+(define #;/contract (with-defaults f env vs ps)
+  #;(((listof ambiguity?) (listof type? . -> . any/c))
+   tclass-env? (listof type-variable?)
+   (listof predicate?)
+   . -> . (result/c any/c))
   (define vps (ambiguities env vs ps))
-  (define tss (map (curry default-candidates env)
-                 vps))
+  (define tss (map (curry default-candidates env) vps))
   (cond [(ormap null? tss) (failure "cannot resolve ambiguity")]
         [else (success (f vps (map car tss)))]))
 
@@ -639,49 +802,51 @@
   (match-define (bg-explicit i scm alts) bgex)
   (do [(qualified qs t) <- (fresh-inst scm)]
       [ps <- (ti-alternative+ env as alts t)]
-      [s <- (get-state)]
-      (define qsp (substitute s qs))
-      (define tp (substitute s t))
-      (define fs (get-type-vars (substitute s as)))
-      (define gs (list-diff (get-type-vars tp) fs))
-      (define scmp (quantify gs (qualified qsp tp)))
-      (define psp (filter (compose not (curry entails? env qsp))
-                          (substitute s ps)))
-      [(cons ds rs) <- (split env fs gs psp)]
-      ;; TODO change these to fail with the state monad (or a monad stack).
-      (cond [(not (equal? scm scmp)) (error "signature too general")]
-            [(not (null? rs)) (error "context too weak")]
-            [else (->TI ds)])))
+    [s <- (get-state)]
+    (define qsp (substitute s qs))
+    (define tp (substitute s t))
+    (define fs (get-type-vars (substitute s as)))
+    (define gs (list-diff (get-type-vars tp) fs))
+    (define scmp (quantify gs (qualified qsp tp)))
+    (define psp (filter (compose not (curry entails? env qsp))
+                        (substitute s ps)))
+    [(cons ds rs) <- (split env fs gs psp)]
+    ;; TODO change these to fail with the state monad (or a monad stack).
+    (cond [(not (equal? scm scmp)) (error "signature too general")]
+          [(not (null? rs)) (error "context too weak")]
+          [else (->TI ds)])))
 
 (define/contract (restricted? bs)
-  ((listof bg-implicit?) . -> . boolean?)
-  (define/match (simple impls)
-    [((bg-implicit i alts)) (ormap (compose null? car) alts)])
+  ((listof implicit/c) . -> . boolean?)
+  (define/contract (simple impls)
+    (implicit/c . -> . boolean?)
+    (match impls [(bg-implicit _ alts)
+                  (ormap (compose null? alternative-pats) alts)]))
   (ormap simple bs))
 
 (define/contract (ti-implicit+ env as bs)
-  (tclass-env? (listof assumption?) (listof bg-implicit?) . -> . TI?)
-  (do [ts <- (map/m (lambda _ (fresh-tv kind-star)))]
+  (tclass-env? (listof assumption?) (listof implicit/c) . -> . TI?)
+  (do [ts <- (map/m (lambda _ (fresh-tv kind-star)) bs)]
       (define is (map bg-implicit-id bs))
-      (define scs (map type->scheme ts))
-      (define asp (map assumption is (append scs as)))
-      (define altss (map bg-implicit-alts bs))
-      [pss <- (sequence/m ti-alternative+ altss ts)]
-      [s <- (get-state)]
-      (define psp (substitute s (apply append pss)))
-      (define tsp (substitute s ts))
-      (define fs (get-type-vars (substitute s as)))
-      (define vss (map get-type-vars tsp))
-      (define gs (foldr1 list-union (list-diff vss fs)))
-      [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp)]
-      (if (restricted? bs)
-          (let* ([gsp (list-diff gs (get-type-vars rs))]
-                [scsp (map (compose (curry quantify gsp)
-                                  (curry qualified '())) tsp)])
-            (->TI (cons (append ds rs) (map assumption is scsp))))
-          (let ([scsp (map (compose (curry quantify gs)
+    (define scs (map type->scheme ts))
+    (define asp (map assumption is (append scs as)))
+    (define altss (map bg-implicit-alts bs))
+    [pss <- (sequence/m (curry ti-alternative+ env asp) altss ts)]
+    [s <- (get-state)]
+    (define psp (substitute s (apply append pss)))
+    (define tsp (substitute s ts))
+    (define fs (get-type-vars (substitute s as)))
+    (define vss (map get-type-vars tsp))
+    (define gs (foldr1 list-union (list-diff vss fs)))
+    [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp)]
+    (if (restricted? bs)
+        (let* ([gsp (list-diff gs (get-type-vars rs))]
+               [scsp (map (compose (curry quantify gsp)
+                                   (curry qualified '())) tsp)])
+          (->TI (cons (append ds rs) (map assumption is scsp))))
+        (let ([scsp (map (compose (curry quantify gs)
                                   (curry qualified rs)) tsp)])
-            (->TI (cons ds (map assumption is scsp)))))))
+          (->TI (cons ds (map assumption is scsp)))))))
 
 (define/contract (ti-bind-group env as bg)
   (tclass-env? (listof assumption?) bind-group? . -> . TI?)
@@ -691,24 +856,22 @@
                     (assumption v scm)))
       [(cons ps aspp) <- (ti-seq ti-implicit+ env (append asp as) iss)]
       [qss <- (map/m (curry ti-explicit env (append aspp asp as)) es)]
-      (->TI (apply append (cons ps qss) (append aspp asp)))))
+      (->TI (cons (append ps (apply append qss))
+                  (append aspp asp)))))
 
 (define (ti-seq ti-f env as bs)
-    (match bs
-      [(list) (->TI (cons '() '()))]
-      [(list bs bss ...)
-       (do [(cons ps asp) <- (ti-f env as bs)]
-           [(cons qs aspp) <- (ti-seq env (append asp as) bss)]
-           (->TI (cons (append ps qs) (append aspp asp))))]))
+  (match bs
+    [(list) (->TI (cons '() '()))]
+    [(list bs bss ...)
+     (do [(cons ps asp) <- (ti-f env as bs)]
+         [(cons qs aspp) <- (ti-seq ti-f env (append asp as) bss)]
+         (->TI (cons (append ps qs) (append aspp asp))))]))
 
 (define/contract (ti-program env as bgs)
   (tclass-env? (listof assumption?) (listof bind-group?) . -> . (listof assumption?))
-  (run-ti
+  (<-TI
    (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
        [s <- (get-state)]
        [rs <- (reduce env (substitute s ps))]
-       [sp <- (default-subst env '() asp)]
+       [sp <- (default-subst env '() rs)]
        (->TI (substitute (sp . @@ . s) asp)))))
-
-(module+ test
-  )
