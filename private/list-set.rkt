@@ -6,7 +6,8 @@
 (provide list-diff
          list-union
          list-intersect
-         foldr1)
+         foldr1
+         list-eqv?)
 
 (define (list-diff as bs)
   (foldr (lambda (e s)
@@ -33,9 +34,16 @@
     [((list a b ...)) (f a (loop (cdr rs)))])
   (loop ls))
 
+;; NOTE only for use in internal tests
+(define (list-eqv? l1 l2)
+  (and (= (length l1)
+          (length l2))
+       (null? (list-diff l1 l2))))
+
 (module+ test
   (require rackunit)
   (check-equal? (list-union '(1) '(2) '(4) '(3)) '(1 2 4 3))
+  (check-equal? (list-union '(1) '(2) '() '(3)) '(1 2 3))
   (check-equal? (list-union '(1 2 3) '(3 2 1)) '(1 2 3))
   (check-equal? (list-union '(3 2 1) '(1 2 3)) '(3 2 1))
   (check-equal? (list-union '(3 3 2 3 1) '(1 2 5 3)) '(3 2 1 5))
@@ -48,5 +56,6 @@
   (check-equal? (list-diff '(1 2 3) '(1 2)) '(3))
   (check-equal? (list-diff '(1 2 3) '(1 2 3)) '())
   (check-equal? (list-diff '(1 2 3) '()) '(1 2 3))
+  (check-equal? (list-diff '(1 2 3) '(1 2 3)) '())
   (check-equal? (list-diff '(1) '(5 6 7)) '(1))
   (check-equal? (list-diff '() '(5 6 7)) '()))
