@@ -6,6 +6,7 @@
  ;; Languages and their parsers
  K0 parse-K0 unparse-K0
  K1 parse-K1 unparse-K1
+ K2 parse-K2 unparse-K2
 
  ;; Primitives
  primitive?
@@ -153,7 +154,7 @@
   (memq p '(#%int+ #%float+)))
 
 ;; XXX the initial Klein `K_0` source language, this is expected to
-;; change  but subsequent changes shouldn't be too large.
+;; change  but subsequent changes shouldn't be /too/ large.
 (define-language K0
   (entry Program)
   (terminals (variable (var))
@@ -171,8 +172,8 @@
   (Alternative (alt)
                ((pat ...) df* ... body0))
   (Definition (df)
-              (define var e)
-              (define var alt* ... alt))
+              (defvar var e)
+              (defun var alt* ... alt))
   ;; TODO a "program" should really be a module. Each module
   ;; /may/ have its own entry point but any program that interfaces
   ;; with OCaml must have exactly one entry (named properly).
@@ -194,21 +195,31 @@
   (Expr (e body)
         (- (lambda alt* ... alt))
         (+ (letrec #;() ;; TODO add explicitly typed bindings
-               (df ...)
+             (df ...)
              body0)))
+  (Definition (df)
+              (- (defvar var e)
+                 (defun var alt* ... alt))
+              (+ (variable var e)
+                 (procedure var alt* ... alt)))
   (Alternative (alt)
                (- ((pat ...) df* ... body0))
                (+ ((pat ...) body)))
-  (Definition (df)
-              (- (define var e)
-                 (define var alt* ... alt))
-              (+ (var e)
-                 (var alt* ... alt)))
   (Program (prog)
            (- (df* ... e))
            ;; Keep the expression in double parens because
            ;; later this will still be a module definition.
            (+ (e))))
+
+(define-language K2
+  (extends K1)
+  (Expr (e body)
+        (- (letrec #;() ;; TODO add explicitly typed bindings
+               (df ...)
+               body0))
+        (+ (letrec #;() ;; TODO add explicitly typed bindings
+               ((df ...) ...)
+               body0))))
 
 ;; ------------------------------------------------
 ;; Typed languages
@@ -218,28 +229,25 @@
 
 (define-parser parse-K0 K0)
 (define-parser parse-K1 K1)
+(define-parser parse-K2 K2)
 
 (module+ test
 
-  (parse-K0 '((define x 10)
-              (define y 3)
-              (define f
+  (parse-K0 '((defvar x 10)
+              (defvar y 3)
+              (defun f
                 [(0) 0]
                 [(n) 1])
               ((#%int+ x) (f 1))))
 
-  (parse-K0 '((define x 10)
-              (define y 3)
+  (parse-K0 '((defvar x 10)
+              (defvar y 3)
               (#%int+ x ((lambda [(0) 0]
                            [(n) 1]) 1))))
 
-  (parse-K1 '(let ([x 10]
-                   [y 3]
-                   [f [(0) 0]
-                      [(n) 1]])
-               (#%int+ x (f 1))))
-
-  (parse-K1 '((define x 10)
-              (define y 3)
-              (#%int+ x ((lambda [(0) 0]
-                           [(n) 1]) 1)))))
+  (parse-K1 '((letrec ([variable x 10]
+                       [variable y 3]
+                       [procedure f
+                                  [(0) 0]
+                                  [(n) 1]])
+                (#%int+ x (f 1))))))

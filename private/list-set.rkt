@@ -7,7 +7,8 @@
          list-union
          list-intersect
          foldr1
-         list-eqv?)
+         list-eqv?
+         list-duplicates?)
 
 (define (list-diff as bs)
   (foldr (lambda (e s)
@@ -39,6 +40,12 @@
   (and (= (length l1)
           (length l2))
        (null? (list-diff l1 l2))))
+
+(define (list-duplicates? ls)
+  (if (null? ls)
+      #false
+      (or (member (car ls) (cdr ls))
+          (list-duplicates? (cdr ls)))))
 
 (module+ test
   (require rackunit)
