@@ -2,9 +2,11 @@
 
 (require (for-syntax racket/base
                      racket/syntax
-                     syntax/parse))
+                     syntax/parse)
+         racket/match)
 
-(provide define-formatted)
+(provide define-formatted
+         foldr1)
 
 ;; ------------------------------------------------
 
@@ -17,3 +19,9 @@
              [(_ msg (... ...))
               #'(name (format msg (... ...)))])))]))
 
+(define (foldr1 f ls)
+  (define/match (loop rs)
+    [((list)) (error "foldr1 expects non-null? lists")]
+    [((list a)) a]
+    [((list a b ...)) (f a (loop (cdr rs)))])
+  (loop ls))

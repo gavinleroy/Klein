@@ -20,10 +20,12 @@
          (prefix-in da: data/applicative)
          data/monad
          data/either
-
+         nanopass/base
          "list-set.rkt"
          "languages.rkt"
          "utils.rkt")
+
+(provide typecheck-K3)
 
 (module+ test (require rackunit))
 
@@ -159,6 +161,10 @@
      (make-constructor-style-printer
       (lambda (o) 'ClassEnv)
       (lambda (o) (list #;TODO))))])
+
+(struct ambiguity (tv ps)
+  #:transparent
+  #:sealed)
 
 ;; TI also embeds a result (failure / success) to signify type checking
 ;; errors. This is essentially an `ExceptT State`.
@@ -322,9 +328,6 @@
     [(type-app t1 _)
      (kind-fun-k2 (get-kind t1))]))
 
-
-
-
 ;; Kind substitutions
 ;; Substitution map is represented using association lists
 
@@ -422,15 +425,15 @@
          (error "kinds do not match")]
         [else (success (u . +-> . t))]))
 
-(define/contract (type-match t1 t2)
+(define/contract (type-match t1 t2 #:fail-with [fail-with failure])
   (type? type? . -> . monad?)
   (match (cons t1 t2)
     [(cons (predicate i t) (predicate ii tt))
      #:when (equal? i ii)
-     (type-match t tt)]
+     (type-match t tt #:fail-with fail-with)]
     [(cons (type-app ll rl) (type-app lr rr))
-     (do [le <- (type-match ll lr)]
-         [re <- (type-match lr rr)]
+     (do [le <- (type-match ll lr #:fail-with fail-with)]
+         [re <- (type-match lr rr #:fail-with fail-with)]
        (merge le re))]
     [(cons u t)
      #:when (and (type-variable? u)
@@ -439,7 +442,7 @@
     [(cons (type-const _ tc1) (type-const _ tc2))
      #:when (equal? tc1 tc2)
      (da:pure empty-subst)]
-    [else (error-format "Types t1 and t2 do not match" t1 t2)]))
+    [else (fail-with "Types do not match")]))
 
 (define/contract (lift-unifier f p1 p2)
   ((predicate? predicate? . -> . (result/c subst/c))
@@ -448,7 +451,7 @@
   (define ii (predicate-id p2))
   (if (symbol=? i ii)
       (f p1 p2)
-      (failure-format "Differing classes '~a '~a" i ii)))
+      (failure-format "Differing classes ~a ~a" i ii)))
 
 (define/contract (most-general-unifier/predicate p1 p2)
   (predicate? predicate? . -> . (result/c subst/c))
@@ -586,8 +589,7 @@
     (match-lambda [(qualified ps h)
                    (do [u <- (type-match/predicate h p)]
                        (success (map (curry substitute u) ps)))]))
-  (define ll (for/list ([it (in-list (env-insts env i))])
-               (try-inst it)))
+  (define ll (map try-inst (env-insts env i)))
   (define ls (filter success? ll))
   (if (null? ls)
       (failure "no suitable instance found")
@@ -622,7 +624,7 @@
              (da:pure (concat ps)))]
         [(head-normal-form? p) (->TI (list p))]
         [else (match (by-inst env p)
-                [(failure _) (error "context reduction")]
+                [(failure msg) (error-format "Context reduction: ~s" msg)]
                 [(success ps) (->head-normal-form env ps)])]))
 
 (define/contract (simplify env ps)
@@ -709,17 +711,19 @@
   (tclass-env (lambda (id) (failure-format "identifier '~a not found in class environment" id ))
               (list %int %float)))
 
-(define core-env
-  empty-env
-  #;(%extend-environment empty-env
-                       #;(env-add-class 'Equal '())
-                       ;; (env-add-class 'Numeric '(Equal))
-                       ;; (env-add-class 'Fractional '(Numeric))
-                       ;; (env-add-class 'Int '(Numeric))
-                       ;; (env-add-class 'Float '(Fractional))
+(define core-environment
+  #;empty-env
+  (%extend-environment empty-env
+                       (env-add-class 'Equal '())
+                       (env-add-class 'Numeric '(Equal))
+                       (env-add-class 'Fractional '(Numeric))
+                       (env-add-class 'Int '(Numeric))
+                       (env-add-class 'Float '(Fractional))
                        #;(env-add-class 'Ord '(Equal))
-                       #;(env-add-inst '() (predicate 'Numeric %int))
-                       #;(env-add-inst '() (predicate 'Fractional %float))))
+                       (env-add-inst '() (predicate 'Equal %int))
+                       (env-add-inst '() (predicate 'Numeric %int))
+                       (env-add-inst '() (predicate 'Int %int))
+                       (env-add-inst '() (predicate 'Float %float))))
 
 (define empty-assumptions '())
 
@@ -753,195 +757,184 @@
 (module+ test
   (define (ti-value p)
     (match p [(success (cons _ v)) (success v)] [o o]))
-  (define-syntax (check-class-relation? stx)
-    (syntax-parse stx
-      [(_ f:expr l:expr)
-       #'(match-let ([(success (cons ps tv)) f])
-           (check-equal?
-            (let loop ([ps ps])
-              (cond [(null? ps) (fail)]
-                    [(equal? (predicate-t (car ps))
-                             tv) (predicate-id (car ps))]
-                    [else (loop (cdr ps))]))
-            l))]))
-
   (check-success? (ti-value (<-TI (ti-literal #\U))) %char)
   #;(check-fail? (<-TI (ti-literal "strings unsupported")))
-  (check-class-relation? (<-TI (ti-literal 100))
-                   'Numeric))
+  (<-TI (ti-literal 100)))
 
-;; TODO pattern inference all other variants
-(define/contract (ti-pattern p)
-  (pattern? . -> . TI/c)
-  (match p
-    [(pat-id i)
+(define (ti-pattern p)
+  (nanopass-case (K3 Pattern) p
+    [,var
      (do [v <- (fresh-tv kind-star)]
-         (->TI `(() ,(list (assumption i (type->scheme v))) . ,v)))]
-    [(pat-lit l)
-     (do [(cons ps t) <- (ti-literal l)]
+         (->TI `(() ,(list (assumption var (type->scheme v))) . ,v)))]
+    [,lit
+     (do [(cons ps t) <- (ti-literal lit)]
          (->TI `(,ps () . ,t)))]))
 
-(define/contract (ti-pattern+ ps)
-  ((listof pattern?) . -> . TI/c)
+(define (ti-pattern+ ps)
+  #;((listof pattern?) . -> . TI/c)
   (do [psasts <- (map/m ti-pattern ps)]
       (define ps (concat (map car psasts)))
-    (define as (concat (map cadr psasts)))
-    (define ts (map cddr psasts))
-    (->TI (cons ps (cons as ts)))))
+      (define as (concat (map cadr psasts)))
+      (define ts (map cddr psasts))
+      (->TI (cons ps (cons as ts)))))
 
-(define/contract (ti-expr env as e)
-  (tclass-env? (listof assumption?) expression? . -> . TI/c)
+;; TODO get rid of this struct once explicit bindings are allowed
+;; in letrec statements.
+(struct bind-group (expls impls)
+  #:transparent
+  #:sealed
+  #:methods gen:custom-write
+  [(define write-proc
+     (make-constructor-style-printer
+      (lambda (o) 'BindGroup)
+      (lambda (o) (list (bind-group-expls o)
+                   (bind-group-impls o)))))])
+
+  (define (ti-seq ti-f env as bs)
+    (match bs
+      [(list) (->TI (cons '() '()))]
+      [(list bs bss ...)
+       (do [(cons ps asp) <- (ti-f env as bs)]
+           [(cons qs aspp) <- (ti-seq ti-f env (append asp as) bss)]
+         (->TI (cons (append ps qs) (append aspp asp))))]))
+
+
+(define (ti-expr env as e)
+  ;; A quick return for Expressions
   (define (return ss t) (->TI (cons ss t)))
-  (match e
-    [(expr-var i)
-     (do [sc <- (find-in-assumptions i as)]
+  (nanopass-case (K3 Expr) e
+    [,var
+     (do [sc <- (find-in-assumptions var as)]
          [(qualified ps t) <- (fresh-inst sc)]
-       (return ps t))]
-    [(expr-lit l) (ti-literal l)]
-    [(expr-const (assumption id scm))
-     (do [(qualified ps t) <- (fresh-inst scm)]
          (return ps t))]
-    [(expr-app f e)
-     (do [(cons ps te) <- (ti-expr env as e)]
-         [(cons qs tf) <- (ti-expr env as f)]
+    [,prim ;; Typecheck the same way a variable would be
+    (do [sc <- (find-in-assumptions prim as)]
+        [(qualified ps t) <- (fresh-inst sc)]
+      (return ps t))]
+    [,lit (ti-literal lit)]
+    ;; TODO not ported to nanopass style
+    #;[(expr-const (assumption id scm))
+      (do [(qualified ps t) <- (fresh-inst scm)]
+          (return ps t))]
+    [(,e0 ,e1)
+     (do [(cons qs tf) <- (ti-expr env as e0)]
+         [(cons ps te) <- (ti-expr env as e1)]
          [t <- (fresh-tv kind-star)]
          (unify ($make-func tf t) te)
          (return (append ps qs) t))]
-    [(expr-let bg e)
-     (do [(cons ps asp) <- (ti-bind-group env as bg)]
+    [(letrec ((,df ...) ...) ,e)
+     (do (define bg (bind-group '() df)) ;; TODO FIXME explicitly typed bgs
+         [(cons ps asp) <- (ti-bind-group env as bg)]
          [(cons qs t) <- (ti-expr env (append asp as) e)]
          (return (append ps qs) t))]))
 
 (module+ test
-  (check-success? (ti-value (<-TI (ti-expr empty-env '() (expr-lit #\U))))
-                  %char)
-  (check-exn exn:fail?
-             (lambda () (ti-value (<-TI (ti-expr empty-env '() (expr-var 'x))))))
-  (check-success?
-   (ti-value (<-TI (ti-expr empty-env
-                            (list (assumption 'x (type->scheme %int)))
-                            (expr-var 'x)))) %int)
-  #;(check-fail? (<-TI
-                (ti-expr empty-env '()
-                         (expr-let (bind-group '()
-                                               '())
-                                   (expr-var 'x)))))
+  (<-TI (ti-expr core-environment
+                 core-assumptions
+                 (with-output-language (K3 Expr)
+                   `0)))
+  (<-TI (ti-expr core-environment
+                 core-assumptions
+                 (with-output-language (K3 Expr)
+                   `((#%int+ 0) 1)))))
 
-#;(<-TI (ti-expr empty-env '()
-                  (expr-let
-                   (bind-group
-                    '()
-                    (list (list (bg-implicit
-                                 'x
-                                 (list (alternative
-                                        '()
-                                        (expr-lit 10)))))))
-                   (expr-var 'x))))
-
-  #;(check-class-relation?
-   #;(let ([x 10]) x)
-   (<-TI (ti-expr empty-env '()
-                  (expr-let
-                   (bind-group
-                    '()
-                    (list (list (bg-implicit
-                                 'x
-                                 (list (alternative
-                                        '()
-                                        (expr-lit 10)))))))
-                   (expr-var 'x)))) 'Numeric)
-  ;; Test for explicit binding with arithmetic
-  #;(let ([f (lambda (x y) x)]) f)
-  #;(<-TI (ti-expr empty-env '()
-                   (expr-let
-                    (bind-group
-                     '()
-                     (list (list (bg-implicit
-                                  "f"
-                                  (list (alternative
-                                         (list (pat-id "x"))
-                                         (expr-var "x")))))))
-                    (expr-var "f"))))
-
-  (<-TI (ti-expr empty-env '()
-                   (expr-let
-                    (bind-group
-                     '()
-                     (list (list (bg-implicit
-                                  'f
-                                  (list (alternative
-                                         (list (pat-id 'x))
-                                         (expr-var 'x)))))))
-                    (expr-app (expr-var 'f)
-                              (expr-lit 10)))))
-
-  #;(<-TI (ti-bind-group
-         core-env
-         core-assumptions
-         (bind-group
-          '()
-          (list (list (bg-implicit
-                       'x
-                       (list (alternative
-                              '()
-                              (expr-app (expr-app (expr-var '#%int+)
-                                                  (expr-lit 1))
-                                        (expr-lit 3))))))))))
-
-  #;(<-TI (ti-expr core-env core-assumptions
-                 (expr-let
-                  (bind-group
-                   '()
-                   (list (list (bg-implicit
-                                'x
-                                (list (alternative
-                                       '()
-                                       (expr-app (expr-app (expr-var '#%int+)
-                                                           (expr-lit 1))
-                                                 (expr-lit 3))))))))
-                  (expr-var 'x))))
-
-
-  #;(check-class-relation?
-   #;(let ([x (#%int+ 1 3)]) x)
-    'Int)
-
-  ;; Test for functions
-  ;; ...
-  )
-
-(define/contract (ti-alternative env as a)
-  (tclass-env? (listof assumption?) alternative? . -> . TI/c)
-  (match a
-    [(alternative pats expr)
-     (do [(cons ps (cons asp ts)) <- (ti-pattern+ pats)]
-         [(cons qs t) <- (ti-expr env (append asp as) expr)]
+(define (ti-alternative env as a)
+  #;(tclass-env? (listof assumption?) alternative? . -> . TI/c)
+  (nanopass-case (K3 Alternative) a
+    [((,pat ...) ,body)
+     (do [(cons ps (cons asp ts)) <- (ti-pattern+ pat)]
+         [(cons qs t) <- (ti-expr env (append asp as) body)]
          (->TI (cons (append ps qs)
                      (foldr (lambda (t1 t2)
                               ($make-func t1 t2)) t ts))))]))
 
-(module+ test
-  #;(<-TI (ti-alternative
-         empty-env '()
-         (alternative (list (pat-id "x"))
-                      (expr-var "x")))))
-
-(define/contract (ti-alternative+ env as alts t)
-  (tclass-env? (listof assumption?)
-               (listof alternative?) type? . -> . TI/c)
+(define (ti-alternative+ env as alts t)
+  #;(tclass-env? (listof assumption?)
+                 (listof alternative?) type? . -> . TI/c)
   (do [psts <- (map/m (curry ti-alternative env as) alts)]
       (map/m (curry unify t) (map cdr psts))
       (->TI (concat (map car psts)))))
 
+(define (ti-explicit env as bgex)
+  (error "INTERNAL ERROR : explicitly typed bindings unsupported" bgex)
+  #;(tclass-env? (listof assumption?) bg-explicit? . -> . TI/c)
+  #;(match-define (bg-explicit i scm alts) bgex)
+  #;(do [(qualified qs t) <- (fresh-inst scm)]
+      [ps <- (ti-alternative+ env as alts t)]
+    [s <- (get-subst)]
+    (define qsp (substitute s qs))
+    (define tp (substitute s t))
+    (define fs (get-type-vars (substitute s as)))
+    (define gs (list-diff (get-type-vars tp) fs))
+    (define scmp (quantify gs (qualified qsp tp)))
+    (define psp (filter (compose not (curry entails? env qsp))
+                        (substitute s ps)))
+    [(cons ds rs) <- (split env fs gs psp)]
+    ;; TODO change these to fail with the state monad (or a monad stack).
+    (cond [(not (equal? scm scmp)) (error "signature too general")]
+          [(not (null? rs)) (error "context too weak")]
+          [else (->TI ds)])))
 
-(module+ test
-  #;(<-TI
-   (do [t <- (fresh-tv kind-star)]
-       (ti-alternative+
-        empty-env '()
-        (list (alternative (list (pat-id "x"))
-                           (expr-var "x")))
-        t))))
+(define (df-var df)
+  (nanopass-case (K3 Definition) df
+    [(bind ,var ,alt ,alt0* ...) var]))
+(define (df-alts df)
+  (nanopass-case (K3 Definition) df
+    [(bind ,var ,alt0 ,alt* ...) (list* alt0 alt*)]))
+
+(define (restricted? bs)
+  ;; simple? returns whether or not the binding is a variable binding.
+  ;; As opposed to a procedure binding.
+  (define (simple? impls)
+    (nanopass-case (K3 Definition) impls
+      [(bind ,var ,alt0 ,alt* ...)
+       (ormap (lambda (alt)
+                (nanopass-case (K3 Alternative) alt
+                  [((,pat ...) ,body)
+                  (null? pat)])) (list* alt0 alt*))]))
+  (ormap simple? bs))
+
+
+;; NOTE bs is a lsit of implicitly typed bindings,
+;; howver, at the K3 level this is a `(df ...).
+(define (ti-implicit+ env as bs)
+  #;(tclass-env? (listof assumption?) (listof implicit/c) . -> . TI/c)
+  (do [ts <- (map/m (lambda _ (fresh-tv kind-star)) bs)]
+      (define is (map df-var bs))
+      (define scs (map type->scheme ts))
+      (define asp #;(map assumption is (append scs as))
+        (for/list ([i (in-list is)]
+                   [sc (in-list (append scs as))])
+          (assumption i sc)))
+      (define altss (map df-alts bs))
+      [pss <- (sequence/m (curry ti-alternative+ env asp) altss ts)]
+      [s <- (get-subst)]
+      (define psp (substitute s (concat pss)))
+      (define tsp (substitute s ts))
+      (define fs (get-type-vars (substitute s as)))
+      (define vss (map get-type-vars tsp))
+      (define gs (list-diff (foldr1 list-union vss) fs))
+      [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp)]
+      (if (restricted? bs)
+          (let* ([gsp (list-diff gs (get-type-vars rs))]
+                [scsp (map (compose (curry quantify gsp)
+                                    (curry qualified '())) tsp)])
+            (->TI (cons (append ds rs) (map assumption is scsp))))
+          (let ([scsp (map (compose (curry quantify gs)
+                                    (curry qualified rs)) tsp)])
+            (->TI (cons ds (map assumption is scsp)))))))
+
+(define (ti-bind-group env as bg)
+  #;(tclass-env? (listof assumption?) bind-group? . -> . TI/c)
+  (match-define (bind-group es iss) bg)
+  (do (define asp '()
+        #;(for/list ([e (in-list es)])
+          (match-define (bg-explicit v scm alts) e)
+          (assumption v scm)))
+      [(cons ps aspp) <- (ti-seq ti-implicit+ env (append asp as) iss)]
+    [qss <- (map/m (curry ti-explicit env (append aspp asp as)) es)]
+    (->TI (cons (append ps (concat qss))
+                (append aspp asp)))))
 
 (define/contract (split env fs gs ps)
   (tclass-env? (listof type-variable?)
@@ -991,110 +984,28 @@
   (with-defaults (lambda (vps ts)
                    (map cons (map car vps) ts)) env vs ps))
 
-(define/contract (ti-explicit env as bgex)
-  (tclass-env? (listof assumption?) bg-explicit? . -> . TI/c)
-  (match-define (bg-explicit i scm alts) bgex)
-  (do [(qualified qs t) <- (fresh-inst scm)]
-      [ps <- (ti-alternative+ env as alts t)]
-    [s <- (get-subst)]
-    (define qsp (substitute s qs))
-    (define tp (substitute s t))
-    (define fs (get-type-vars (substitute s as)))
-    (define gs (list-diff (get-type-vars tp) fs))
-    (define scmp (quantify gs (qualified qsp tp)))
-    (define psp (filter (compose not (curry entails? env qsp))
-                        (substitute s ps)))
-    [(cons ds rs) <- (split env fs gs psp)]
-    ;; TODO change these to fail with the state monad (or a monad stack).
-    (cond [(not (equal? scm scmp)) (error "signature too general")]
-          [(not (null? rs)) (error "context too weak")]
-          [else (->TI ds)])))
-
-(define/contract (restricted? bs)
-  ((listof implicit/c) . -> . boolean?)
-  (define/contract (simple impls)
-    (implicit/c . -> . boolean?)
-    (match impls [(bg-implicit _ alts)
-                  (ormap (compose null? alternative-pats) alts)]))
-  (ormap simple bs))
-
-(define/contract (ti-implicit+ env as bs)
-  (tclass-env? (listof assumption?) (listof implicit/c) . -> . TI/c)
-  (do [ts <- (map/m (lambda _ (fresh-tv kind-star)) bs)]
-      (define is (map bg-implicit-id bs))
-      (define scs (map type->scheme ts))
-      ;; TODO REMOVE FIXME
-      (define _ (printf "mapping assumptions:\n~a\n~a\n" is (append scs as)))
-      (define asp (map assumption is (append scs as)))
-      (define altss (map bg-implicit-alts bs))
-      [pss <- (sequence/m (curry ti-alternative+ env asp) altss ts)]
-      [s <- (get-subst)]
-      (define psp (substitute s (concat pss)))
-      (define tsp (substitute s ts))
-      (define fs (get-type-vars (substitute s as)))
-      (define vss (map get-type-vars tsp))
-      (define gs (list-diff (foldr1 list-union vss) fs))
-      [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp)]
-      (if (restricted? bs)
-          (let* ([gsp (list-diff gs (get-type-vars rs))]
-                 [scsp (map (compose (curry quantify gsp)
-                                     (curry qualified '())) tsp)])
-            (->TI (cons (append ds rs) (map assumption is scsp))))
-          (let ([scsp (map (compose (curry quantify gs)
-                                    (curry qualified rs)) tsp)])
-            (->TI (cons ds (map assumption is scsp)))))))
+;; TODO modify the compiler pipeline in `nanopass.rkt` to pass
+;; this method an environment as well.
+(define (typecheck-K3 p)
+  (define env core-environment)
+  (define as core-assumptions)
+  (define (ti p)
+    (nanopass-case (K3 Program) p
+      [(((,df ...) ...) ...)
+       (define bgs (map (lambda (df*) (bind-group '() df*)) df))
+       (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
+           [s <- (get-subst)]
+           [rs <- (reduce env (substitute s ps))]
+           [sp <- (default-subst env '() rs)]
+           (->TI (substitute (sp . @@ . s) asp)))]))
+  (<-TI (ti p)))
 
 (module+ test
-  #;(<-TI (ti-implicit+
-           empty-env '()
-           (list (bg-implicit
-                  'id
-                  (list (alternative
-                         (list (pat-id 'x))
-                         (expr-var 'x)))))))
+  (typecheck-K3
+   (with-output-language (K3 Program)
+     `((((bind main ((#%int+ 0) 1)))))))
 
-  #;(<-TI (ti-implicit+
-         empty-env '()
-         (list (bg-implicit
-                'x
-                (list (alternative
-                       '()
-                       (expr-lit 10))))))))
-
-(define/contract (ti-bind-group env as bg)
-  (tclass-env? (listof assumption?) bind-group? . -> . TI/c)
-  (match-define (bind-group es iss) bg)
-  (do (define asp (for/list ([e (in-list es)])
-                    (match-define (bg-explicit v scm alts) e)
-                    (assumption v scm)))
-      [(cons ps aspp) <- (ti-seq ti-implicit+ env (append asp as) iss)]
-      [qss <- (map/m (curry ti-explicit env (append aspp asp as)) es)]
-      (->TI (cons (append ps (concat qss))
-                  (append aspp asp)))))
-
-(define (ti-seq ti-f env as bs)
-  (match bs
-    [(list) (->TI (cons '() '()))]
-    [(list bs bss ...)
-     (do [(cons ps asp) <- (ti-f env as bs)]
-         [(cons qs aspp) <- (ti-seq ti-f env (append asp as) bss)]
-         (->TI (cons (append ps qs) (append aspp asp))))]))
-
-(module+ test
-  #;(<-TI (ti-bind-group empty-env '()
-                       (bind-group
-                        (list)
-                        (list (list (bg-implicit
-                                     'id
-                                     (list (alternative
-                                            (list (pat-id 'x))
-                                            (expr-var 'x))))))))))
-
-(define/contract (ti-program env as bgs)
-  (tclass-env? (listof assumption?) (listof bind-group?) . -> . (listof assumption?))
-  (<-TI
-   (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
-       [s <- (get-subst)]
-       [rs <- (reduce env (substitute s ps))]
-       [sp <- (default-subst env '() rs)]
-       (->TI (substitute (sp . @@ . s) asp)))))
+  (typecheck-K3
+   (with-output-language (K3 Program)
+     `((((bind id ((x) x)))
+        ((bind main ((#%int+ 0) 1))))))))

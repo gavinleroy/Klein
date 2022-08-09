@@ -1,7 +1,8 @@
 #lang racket/base
 
 (require racket/match
-         racket/list)
+         racket/list
+         "utils.rkt")
 
 (provide list-diff
          list-union
@@ -27,13 +28,6 @@
                       (cons (car ls) (loop (cdr ls)))
                       (loop (cdr ls)))])))
   (foldr1 outer as))
-
-(define (foldr1 f ls)
-  (define/match (loop rs)
-    [((list)) (error "foldr1 expects non-null? lists")]
-    [((list a)) a]
-    [((list a b ...)) (f a (loop (cdr rs)))])
-  (loop ls))
 
 ;; NOTE only for use in internal tests
 (define (list-eqv? l1 l2)
