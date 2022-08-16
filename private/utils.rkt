@@ -3,7 +3,8 @@
 (require (for-syntax racket/base
                      racket/syntax
                      syntax/parse)
-         racket/match)
+         racket/match
+         racket/function)
 
 (provide define-formatted
          foldr1)
@@ -14,10 +15,8 @@
   (syntax-parse stx
     [(_ name:id)
      (with-syntax ([n (format-id #'name "~a-format" #'name)])
-       #'(define-syntax (n stx)
-           (syntax-case stx ()
-             [(_ msg (... ...))
-              #'(name (format msg (... ...)))])))]))
+       #'(define (n fmt-msg . args)
+           (name (apply (curry format fmt-msg) args))))]))
 
 (define (foldr1 f ls)
   (define/match (loop rs)

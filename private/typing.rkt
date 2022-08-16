@@ -29,9 +29,18 @@
 
 (module+ test (require rackunit))
 
+;; TODO FIXME REMOVE
+(define-syntax (define/print stx)
+  (syntax-case stx ()
+    [(_ id expr)
+     #'(define id
+         (let* ([e expr]
+                [_ (printf "~a: ~a\n" 'id e)])
+           e))]))
+
 ;; A Star kind represents nullary (simple) types. E.g. Int, FLoat, Char, ...
 ;; A KFun represents a type constructor from k1 -> k2
-(struct kind ())
+(struct kind () #:transparent)
 (struct %#kind-star kind ()
   #:transparent
   #:sealed
@@ -51,10 +60,9 @@
                    (kind-fun-k2 o)))))])
 ;; Only one Star kind is required
 (define kind-star (%#kind-star))
-(define (kind-star? s)
-  (eq? s kind-star))
+(define kind-star? %#kind-star?)
 
-(struct type ())
+(struct type () #:transparent)
 (struct type-variable type (id k)
   #:transparent
   #:sealed
@@ -104,6 +112,7 @@
      (make-constructor-style-printer
       (lambda (o) 'Qualified)
       (lambda (o) (list (qualified-predicates o)
+                   ':=>
                    (qualified-head o)))))])
 (define (qualified/c t?)
   (and/c qualified? (compose t? qualified-head)))
@@ -116,8 +125,8 @@
   [(define write-proc
      (make-constructor-style-printer
       (lambda (o) 'Predicate)
-      (lambda (o) (list (predicate-t o)
-                   (predicate-id o)))))])
+      (lambda (o) (list (predicate-id o)
+                   (predicate-t o)))))])
 
 ;; A type scheme relates all universally quantified  variables in the qualified
 ;; types with a kind in `kinds`. These variables are ordered and the nth
@@ -200,7 +209,11 @@
 (define (result/c ctc) (or/c (either/c string? ctc)
                              (da:pure/c (either/c string? ctc))))
 (define TI/c (or/c (da:pure/c TI?) TI?))
-(define subst/c (listof pair?))
+(define (entry? p)
+  (and (pair? p)
+       (type-variable? (car p))
+       (type? (cdr p))))
+(define subst/c (listof entry?))
 
 ;; Helpers for working with a Type Inference state
 (define (->TI x) (TI (lambda (s) (cons s (success x)))))
@@ -219,9 +232,12 @@
                            [genid (cons c i)])
               (success (format-symbol "~a~a" (integer->char c) i))))))
 
-;; Define showrtcut methods
+;; Formatted versionis of string error handlers.
 (define-formatted error)
 (define-formatted failure)
+
+(define (fail-proc/c res/c)
+  (->* (string?) #:rest (listof any/c) res/c))
 
 (define/contract (<-TI ti)
   (TI/c . -> . (result/c any/c))
@@ -236,9 +252,11 @@
                       [subst (sp . @@ . (state-subst s))])
               (success 'dummy)))))
 
-(define/contract (fail/m msg)
-  (string? . -> . TI/c)
-  (TI (lambda (s) (cons s (failure msg)))))
+(define/contract (fail/m msg . args)
+  (fail-proc/c TI?)
+  (TI (lambda (s) (cons s (apply (curry failure-format msg)
+                            args)))))
+
 (define-syntax (sequence/m stx)
   (syntax-case stx ()
     [(_ f ms ...)
@@ -275,7 +293,7 @@
                             (get-subst))) '(2 1 0))
   (check-success? (<-TI (sequence/m %add '(1 2 3) '(3 2 1)))
                   '(4 4 4))
-  #;(check-fail? (<-TI (do [x <- (->TI 0)]
+  (check-fail? (<-TI (do [x <- (->TI 0)]
                          [y <- (%add x x)]
                          [z <- (fail/m "whoops!")]
                          (%add z y)))))
@@ -289,7 +307,7 @@
                    [%pat #'pattern])
        #'(define %name (type-const %pat kind-star)))]))
 
-(def-ty-prim '() %unit)
+(def-ty-prim '<!> %unit)
 (def-ty-prim 'Char %char)
 (def-ty-prim 'Int %int)
 (def-ty-prim 'Float %float)
@@ -320,7 +338,6 @@
 (define-syntax ($make-pair stx)
   (syntax-case stx ()
     [(_ a b) #'(type-app (type-app %tuple2 a) b)]))
-
 (define (get-kind t)
   (match t
     [(type-variable _ k) k]
@@ -332,117 +349,117 @@
 ;; Substitution map is represented using association lists
 
 (define empty-subst '())
+
 (define/contract (+-> u t)
   (type-variable? type? . -> . subst/c)
-  (list (cons u t)))
+  `((,u . ,t)))
 
 (define/contract (substitute sub t)
   (subst/c (or/c (listof type?) type?) . -> . (or/c (listof type?) type?))
-  (cond [(list? t) (map (curry substitute sub) t)]
-        ;; Singleton case
-        [else (match t
-                [(type-variable _ _)
-                 (match (assoc t sub)
-                   [#false t]
-                   [(cons _ ty) ty])]
-                [(type-app t1 t2) (type-app (substitute sub t1)
-                                            (substitute sub t2))]
-                [(qualified ps head)
-                 (qualified (substitute sub ps)
-                            (substitute sub head))]
-                [(predicate i t) (predicate i (substitute sub t))]
-                [(scheme ks qt) (scheme ks (substitute sub qt))]
-                [(assumption i ts) (assumption i (substitute sub ts))]
-                [else t])]))
+  (if (list? t)
+      (map (curry substitute sub) t)
+      (match t
+        [(type-variable _ _)
+         (let ([assc (assoc t sub)])
+           (if assc
+               (cdr assc)
+               t))]
+        [(type-app t1 t2) (type-app (substitute sub t1)
+                                    (substitute sub t2))]
+        [(qualified ps head)
+         (qualified (substitute sub ps)
+                    (substitute sub head))]
+        [(predicate i t) (predicate i (substitute sub t))]
+        [(scheme ks qt) (scheme ks (substitute sub qt))]
+        [(assumption i ts) (assumption i (substitute sub ts))]
+        [else t])))
 
 (define/contract (get-type-vars t)
-  ((or/c (listof type?) type?) . -> . (listof type?))
-    (cond [(list? t) (apply list-union (map get-type-vars t))]
-          [else (match t
-                  [(type-variable _ _) (list t)]
-                  [(type-app l r) (list-union (get-type-vars l) (get-type-vars r))]
-                  [(qualified ps head) (list-union (get-type-vars ps)
-                                                   (get-type-vars head))]
-                  [(predicate _ t) (get-type-vars t)]
-                  [(scheme _ qt) (get-type-vars qt)]
-                  [(assumption _ ts) (get-type-vars ts)]
-                  [else (list)])]))
+  ((or/c (listof type?) type?) . -> . (listof type-variable?))
+  (if (list? t)
+      (apply list-union (map get-type-vars t))
+      (match t
+        [(type-variable _ _) (list t)]
+        [(type-app l r) (list-union (get-type-vars l) (get-type-vars r))]
+        [(qualified ps head) (list-union (get-type-vars ps)
+                                         (get-type-vars head))]
+        [(predicate _ t) (get-type-vars t)]
+        [(scheme _ qt) (get-type-vars qt)]
+        [(assumption _ ts) (get-type-vars ts)]
+        [else (list)])))
 
 ;; @@ is the infix operator for substitution composition
 (define/contract (@@ s1 s2)
   (subst/c subst/c . -> . subst/c)
-  (let ([ls (for/list ([tup (in-list s2)])
-              (match-let ([(cons u t) tup])
-                (cons u (substitute s1 t))))])
-    (append ls s1)))
+  (define ls (for/list ([tup (in-list s2)])
+               (cons (car tup) (substitute s1 (cdr tup)))))
+  (append ls s1))
 
-(define/contract (merge s1 s2)
-  (subst/c subst/c . -> . monad?)
+(define/contract (merge s1 s2 #:fail-with [fw error-format])
+  (->* (subst/c subst/c) (#:fail-with (fail-proc/c monad?)) monad?)
   (define (heads ls) (map car ls))
   (let ([agreeable (andmap (lambda (v) (equal? (substitute s1 v)
                                           (substitute s2 v)))
                            (list-intersect (heads s1) (heads s2)))])
     (if agreeable
         (da:pure (append s1 s2))
-        (error "merge fail"))))
+        (fw "merge fail"))))
 
-;; Unification
-
-(define/contract (most-general-unifier t1 t2)
-  (type? type? . -> . monad?)
+(define/contract (most-general-unifier t1 t2 #:fail-with [fw error-format])
+  (->* (type? type?) (#:fail-with (fail-proc/c monad?)) monad?)
   (match (cons t1 t2)
     [(cons (predicate i t) (predicate ii tt))
-     #:when (equal? i ii)
-     (most-general-unifier t tt)]
+     #:when (symbol=? i ii)
+     (most-general-unifier t tt #:fail-with fw)]
 
     [(cons (type-app ll rl) (type-app lr rr))
-     (do [s1 <- (most-general-unifier ll lr)]
+     (do [s1 <- (most-general-unifier ll lr #:fail-with fw)]
          [s2 <- (most-general-unifier (substitute s1 rl)
-                                      (substitute s1 rr))]
+                                      (substitute s1 rr)
+                                      #:fail-with fw)]
        (da:pure (s2 . @@ . s1)))]
     [(cons u t)
      #:when (type-variable? u)
-     (bind-variable u t)]
+     (bind-variable u t #:fail-with fw)]
     [(cons t u)
      #:when (type-variable? u)
-     (bind-variable u t)]
+     (bind-variable u t #:fail-with fw)]
     [(cons tc1 tc2)
      #:when (and (type-const? tc1)
                  (type-const? tc2)
                  (equal? tc1 tc2))
      (da:pure empty-subst)]
-    [else (error-format "Types: ~a\n~a do not unify." t1 t2)]))
+    [else (fw "Types: ~a\n~a do not unify." t1 t2)]))
 
-(define/contract (bind-variable u t)
-  (type-variable? type? . -> . monad?)
+(define/contract (bind-variable u t #:fail-with [fw error-format])
+  (->* (type-variable? type?)
+       (#:fail-with (fail-proc/c monad?)) monad?)
   (cond [(and (type-variable? t)
               (equal? u t))
          (da:pure empty-subst)]
         [(member u (get-type-vars t))
-         (error "occurs check fails")]
+         (fw "Occurs check fails")]
         [(not (equal? (get-kind u)
                       (get-kind t)))
-         (error "kinds do not match")]
+         (fw "Kinds do not match")]
         [else (success (u . +-> . t))]))
 
-(define/contract (type-match t1 t2 #:fail-with [fail-with failure])
-  (type? type? . -> . monad?)
+(define/contract (type-match t1 t2 #:fail-with [fw failure])
+  (->* (type? type?)
+       (#:fail-with (fail-proc/c monad?)) monad?)
   (match (cons t1 t2)
-    [(cons (predicate i t) (predicate ii tt))
-     #:when (equal? i ii)
-     (type-match t tt #:fail-with fail-with)]
     [(cons (type-app ll rl) (type-app lr rr))
-     (do [le <- (type-match ll lr #:fail-with fail-with)]
-         [re <- (type-match lr rr #:fail-with fail-with)]
-       (merge le re))]
-    [(cons u t)
-     #:when (and (type-variable? u)
-                 (equal? (get-kind u) (get-kind t)))
-     (da:pure (u . +-> . t))]
-    [(cons (type-const _ tc1) (type-const _ tc2))
-     #:when (equal? tc1 tc2)
+     (do [le <- (type-match ll lr #:fail-with fw)]
+         [re <- (type-match lr rr #:fail-with fw)]
+       (merge le re #:fail-with fw))]
+    [(cons (type-variable u kl) t)
+     #:when (equal? kl (get-kind t))
+     (da:pure (t1 . +-> . t))]
+    [(cons (type-const idl kc1) (type-const idr kc2))
+     #:when (and (symbol=? idl idr)
+                 (equal? kc1 kc2))
      (da:pure empty-subst)]
-    [else (fail-with "Types do not match")]))
+    [else (fw "Types do not match")]))
 
 (define/contract (lift-unifier f p1 p2)
   ((predicate? predicate? . -> . (result/c subst/c))
@@ -455,25 +472,31 @@
 
 (define/contract (most-general-unifier/predicate p1 p2)
   (predicate? predicate? . -> . (result/c subst/c))
-  (lift-unifier most-general-unifier p1 p2))
+  (lift-unifier (curry most-general-unifier
+                       #:fail-with failure-format) p1 p2))
 
 (define/contract (type-match/predicate p1 p2)
   (predicate? predicate? . -> . (result/c subst/c))
-  (lift-unifier type-match p1 p2))
+  (printf "Matching preds:\n~a\n~a\n\n" p1 p2)
+  (lift-unifier (curry type-match
+                       #:fail-with failure-format) p1 p2))
 
+;; ------------------------------------------------
 ;; Class environemnts
 
 (define/contract #;INTERNAL (env-super env i)
   (tclass-env? symbol? . -> . (listof symbol?))
   (match ((tclass-env-classes env) i)
     [(success (tclass ids _)) ids]
-    [(failure msg) '()]))
+    [(failure msg)
+     (error-format "INTERNAL: env-super shouldn't return failure ~a" msg)]))
 
 (define/contract #;INTERNAL (env-insts env i)
   (tclass-env? symbol? . -> . (listof (qualified/c predicate?)))
   (match ((tclass-env-classes env) i)
     [(success (tclass _ is)) is]
-    [(failure msg) '()]))
+    [(failure msg)
+     (error-format "INTERNAL: env-insts shouldn't return failure ~a" msg)]))
 
 (define/contract #;INTERNAL (defined? m)
   ((result/c any/c) . -> . boolean?)
@@ -533,12 +556,13 @@
     (define c (tclass (env-super env i)
                       (cons (qualified ps p) its)))
     (cond [(not (defined? ((tclass-env-classes env) i)))
-           (failure "no class for instance")]
-          [(ormap (curry overlap? p) qs) (failure "")]
+           (failure-format "No class for instance '~a" i)]
+          [(ormap (curry overlap? p) qs)
+           (define first-overlap (findf (curry overlap? p) qs))
+           (failure-format "Overlapping instances\n~a \n~a" p first-overlap)]
           [else (success (env-bind env i c))])))
 
 (module+ test
-  ;; FIXME
   (define-syntax (check-list-eqv? stx)
     (syntax-case stx ()
       [(_ ac ex)
@@ -558,22 +582,22 @@
                          (env-add-inst '() (predicate 'Fish %unit))
                          #;(env-add-inst (list (predicate 'Fish a-ty))
                                          (predicate 'Fish ($make-list a-ty)))))
-  ;; (check-equal? a-ty a-ty)
-  ;; (check-equal? %unit %unit)
-  ;; (check-equal? (predicate 'Fish %unit)
-  ;;               (predicate 'Fish %unit))
-  ;; (check-equal? (qualified '() (predicate 'Fish %unit))
-  ;;               (qualified '() (predicate 'Fish %unit)))
+
+  (check-equal? a-ty a-ty)
+  (check-equal? %unit %unit)
+  (check-equal? (predicate 'Fish %unit)
+                (predicate 'Fish %unit))
+  (check-equal? (qualified '() (predicate 'Fish %unit))
+                (qualified '() (predicate 'Fish %unit)))
 
   (check-list-eqv? (env-super fishy-env 'Fish) '())
   (check-list-eqv? (env-super fishy-env 'BlueFish) '(Fish))
   (check-list-eqv? (env-super fishy-env 'RedFish) '(Fish))
   (check-list-eqv? (env-super fishy-env 'PurpleFish) '(RedFish BlueFish))
   (check-list-eqv? (env-super fishy-env 'HungryFish) '(PurpleFish))
-  #;(check-list-eqv? (env-insts fishy-env 'Fish)
-                   (list (qualified (predicate 'Fish a-ty)
-                                    (predicate 'Fish ($make-list a-ty)))
-                         (qualified '() (predicate 'Fish %unit)))))
+  (check-list-eqv? (env-insts fishy-env 'Fish)
+                   (list (qualified '() (predicate 'Fish %unit))))
+  )
 
 (define/contract (by-super env p)
   (tclass-env? predicate? . -> . (listof predicate?))
@@ -585,14 +609,16 @@
 (define/contract (by-inst env p)
   (tclass-env? predicate? . -> . (result/c (listof predicate?)))
   (match-define (predicate i _) p)
-  (define try-inst
-    (match-lambda [(qualified ps h)
-                   (do [u <- (type-match/predicate h p)]
-                       (success (map (curry substitute u) ps)))]))
+  (define/contract (try-inst ql)
+    (qualified? . -> . (result/c (listof (listof predicate?))))
+    (match-define (qualified ps h) ql)
+    (do [u <- (type-match/predicate h p)]
+        (success (map (curry substitute u) ps))))
+  (printf "Current insts of '~a : ~a\n" i (env-insts env i))
   (define ll (map try-inst (env-insts env i)))
   (define ls (filter success? ll))
   (if (null? ls)
-      (failure "no suitable instance found")
+      (failure "No suitable instance found")
       (success (car ls))))
 
 ;; Given a type class environment, report whether or not p
@@ -600,32 +626,39 @@
 (define/contract (entails? env ps p)
   (tclass-env? (listof predicate?) predicate? . -> . boolean?)
   ;; predicate p is deduced by a super
-  (or (ormap (curry member p) (map (curry by-super env) ps))
-      ;; otherwise, for all predicates qs of a matching instance
-      ;; the predicates ps must follow.
-      (match (by-inst env p)
-        [(failure _) #false]
-        [(success qs) (andmap (curry entails? env ps) qs)])))
+  (and (or (ormap (curry member p) (map (curry by-super env) ps))
+           ;; otherwise, for all predicates qs of a matching instance
+           ;; the predicates ps must follow.
+           (match (by-inst env p)
+             [(failure _) #false]
+             [(success qs) (andmap (curry entails? env ps) qs)]))
+       #true))
 
 (define/contract (head-normal-form? prd)
   (predicate? . -> . boolean?)
+  (printf "HNF? ~a\n" prd)
   (define (r v)
     (cond [(type-variable? v) #true]
           [(type-const? v) #false]
           [(type-app? v) (r (type-app-t1 v))]
-          [else (error "invalid type")]))
-  (match-define (predicate c t) prd)
-  (r t))
+          [else (error-format "INTERNAL: invalid type ~a" v)]))
+  (r (predicate-t prd)))
 
-(define/contract (->head-normal-form env p)
-  (tclass-env? (or/c (listof predicate?) predicate?) . -> . monad?)
-  (cond [(list? p)
-         (do [ps <- (map/m (curry ->head-normal-form env) p)]
-             (da:pure (concat ps)))]
-        [(head-normal-form? p) (->TI (list p))]
-        [else (match (by-inst env p)
-                [(failure msg) (error-format "Context reduction: ~s" msg)]
-                [(success ps) (->head-normal-form env ps)])]))
+(define/contract (->head-normal-form+ env ps #:fail-with [fw error-format])
+  (->* (tclass-env? (listof predicate?)) (#:fail-with (fail-proc/c monad?)) monad?)
+  (do [pss <- (map/m (curry ->head-normal-form env #:fail-with fw) ps)]
+      (da:pure (concat pss))))
+
+(define/contract (->head-normal-form env p #:fail-with [fw error-format])
+  (->* (tclass-env? predicate?) (#:fail-with (fail-proc/c monad?)) monad?)
+  (printf "->HNF ~a\n" p)
+  (cond [(head-normal-form? p) (->TI (list p))]
+        [else
+         (begin
+           (printf "BY INST: ~a in ~a\n" env p)
+         (match (by-inst env p)
+                [(failure msg) (fw "Context reduction: ~s" msg)]
+                [(success ps) (->head-normal-form+ env ps #:fail-with fw)]))]))
 
 (define/contract (simplify env ps)
   (tclass-env? (listof predicate?) . -> . (listof predicate?))
@@ -638,9 +671,10 @@
       [(list p ps ...) (loop (cons p rs) ps)]))
   (loop '() ps))
 
-(define/contract (reduce env ps)
-  (tclass-env? (listof predicate?) . -> . monad?)
-  (do [qs <- (->head-normal-form env ps)]
+(define/contract (reduce env ps #:fail-with [fw error-format])
+  (->* (tclass-env? (listof predicate?))
+       (#:fail-with (fail-proc/c monad?)) monad?)
+  (do [qs <- (->head-normal-form+ env ps #:fail-with fw)]
       (da:pure (simplify env qs))))
 
 (define/contract (quantify vs qt)
@@ -657,20 +691,23 @@
   (type? . -> . scheme?)
   (scheme '() (qualified '() t)))
 
-(define/contract (find-in-assumptions id as)
-  (symbol? (listof assumption?) . -> . monad?)
+(define/contract (find-in-assumptions id as #:fail-with [fw error-format])
+  (->* (symbol? (listof assumption?))
+       (#:fail-with (fail-proc/c monad?)) monad?)
+  (printf "Searching in Assumptions: ~a\n" as)
   (match as
-    [(list) (error-format "unbound identifier: ~a" id)]
+    [(list) (fw "unbound identifier: ~a" id)]
     [(list (assumption i ts) as ...)
-     (if (equal? id i)
+     (if (symbol=? id i)
          (da:pure ts)
-         (find-in-assumptions id as))]))
+         (find-in-assumptions id as #:fail-with fw))]))
 
 (define/contract (unify t1 t2)
   (type? type? . -> . TI/c)
   (do [s <- (get-subst)]
       [u <- (most-general-unifier (substitute s t1)
-                                  (substitute s t2))]
+                                  (substitute s t2)
+                                  #:fail-with fail/m)]
     (ext-state u)))
 
 (define/contract (fresh-tv k)
@@ -706,39 +743,143 @@
     [t t]))
 
 ;; -----------------------------------------------
+;; Core standard library
+;; -----------------------------------------------
+;;
+;; XXX This /very unstable/ version of the Core library
+;; needs to get expanded drastically. It also should
+;; be written in Klein code when the expansion happens.
+;; For this to happen:
+;; [ ] the typechecker needs to be stable
+;; [ ] explicit types / classes allowed in parsing K0
+;; -----------------------------------------------
 
 (define empty-env
-  (tclass-env (lambda (id) (failure-format "identifier '~a not found in class environment" id ))
-              (list %int %float)))
+  (tclass-env
+   (lambda (id) (failure-format "Identifier '~a unbound in class environment" id ))
+   (list %int %float)))
+
+;; A list of the STD numeric class tower.
+;; [ ] TODO extend me.
+;; [ ] TODO remove me and write Klein code that replaces me.
+(define numeric-classes
+  '(Numeric
+    Fractional
+    Int
+    Float))
+
+;; A list of the Core Klein classes.
+;; [ ] TODO extend me.
+(define core-classes
+  '(Equal))
+
+(define env+core-classes
+  (lambda (env)
+    (%extend-environment
+     env
+     (env-add-class 'Equal '()))))
+
+(define env+numeric-classes
+  (lambda (env)
+    (%extend-environment
+     env
+     (env-add-class 'Numeric '(Equal))
+     (env-add-class 'Fractional '(Numeric))
+     (env-add-class 'Int '(Numeric))
+     (env-add-class 'Float '(Fractional)))))
+
+;; TODO split the instances up by numeric and core
+;; TODO remove me and write Klein code that replaces me
+(define env+pervasive-instances
+  (let ([ty-a (type-variable 'a kind-star)])
+    (lambda (env)
+      (%extend-environment
+       env
+       (env-add-inst '() (predicate 'Equal %unit))
+       (env-add-inst '() (predicate 'Equal %char))
+       (env-add-inst '() (predicate 'Equal %int))
+       (env-add-inst '() (predicate 'Equal %float))
+       ;; ---
+       (env-add-inst '() (predicate 'Numeric %int))
+       (env-add-inst '() (predicate 'Float %float))
+       ;; ---
+       #;(env-add-inst (list (predicate 'Int ty-a)) (predicate 'Numeric ty-a))
+       #;(env-add-inst (list (predicate 'Float ty-a)) (predicate 'Fractional ty-a))
+       ;; ---
+       #;(env-add-inst (list (predicate 'Fractional ty-a)) (predicate 'Numeric ty-a))
+       ))))
+
+(define env+pervasives
+  (compose env+pervasive-instances
+           env+numeric-classes
+           env+core-classes))
 
 (define core-environment
-  #;empty-env
-  (%extend-environment empty-env
-                       (env-add-class 'Equal '())
-                       (env-add-class 'Numeric '(Equal))
-                       (env-add-class 'Fractional '(Numeric))
-                       (env-add-class 'Int '(Numeric))
-                       (env-add-class 'Float '(Fractional))
-                       #;(env-add-class 'Ord '(Equal))
-                       (env-add-inst '() (predicate 'Equal %int))
-                       (env-add-inst '() (predicate 'Numeric %int))
-                       (env-add-inst '() (predicate 'Int %int))
-                       (env-add-inst '() (predicate 'Float %float))))
+  (env+pervasives empty-env))
 
 (define empty-assumptions '())
 
 (define core-assumptions
   ;; TODO synchronize this with the primitives
-  (list* (assumption '#%int+
-                     (type->scheme
-                      (type-app (type-app %arrow %int) %int)))
-         (assumption '#%float+
-                     (type->scheme
-                      (type-app (type-app %arrow %float) %float)))
+  (list* (assumption'#%identity ;; TODO REMOVE
+          (scheme (list kind-star)
+                  (qualified '()
+                             ($make-func (type-gen 0)
+                                         (type-gen 0)))))
+         ;; ---
+         (let ([t (type-gen 0)])
+           (assumption '#%num+
+                       (scheme (list kind-star)
+                               (qualified (list (predicate 'Numeric t))
+                                          ($make-func t t t)))))
          empty-assumptions))
 
 ;; -----------------------------------------------
-;; Type Inference
+
+(define/contract (ambiguities env vs ps)
+  (tclass-env? (listof type-variable?)
+               (listof predicate?) . -> . (listof ambiguity?))
+  (for/list ([v (in-list (list-diff (get-type-vars ps) vs))])
+    (define preds (filter (compose (curry member v)
+                                   get-type-vars) ps))
+    (ambiguity v preds)))
+
+(define/contract (default-candidates env amb)
+  (tclass-env? ambiguity? . -> . (listof type?))
+  (error "YELP finish defaulting")
+  ;; An ambiguity can be defaulted if it meets specific criteria. Currently, no
+  ;; ambiguities will be defaulted and must be specified by the programmer.
+  ;; These conditions are as follows:
+  ;; - All QS predicates are of the form: (predicate _ (type-variable _)).
+  ;; - One of the classes involved is a numeric class.
+  ;; - All classes involved are from the standard library.
+  ;; https://web.cecs.pdx.edu/~mpj/thih/TypingHaskellInHaskell.html#Haskell98
+  ;; (match-define (ambiguity v qs) amb)
+  ;; (define is (map ... qs))
+  ;; (define ts (map ... qs))
+  #;(for/list (#:do [(define )])))
+
+(define/contract (with-defaults f env vs ps #:fail-with [fw error-format])
+  (->* (((listof ambiguity?) (listof type?) . -> . any/c)
+        tclass-env? (listof type-variable?)
+        (listof predicate?))
+       (#:fail-with (fail-proc/c monad?)) monad?)
+  (define vps (ambiguities env vs ps))
+  (define tss (map (curry default-candidates env) vps))
+  (cond [(ormap null? tss) (failure "cannot resolve ambiguity")]
+        [else (success (f vps (map car tss)))]))
+
+(define (default-predicates env vs ps #:fail-with [fw error-format])
+  (with-defaults (lambda (vps ts)
+                   (concat (map cadr vps))) env vs ps #:fail-with fw))
+
+(define (default-subst env vs ps #:fail-with [fw error-format])
+  (with-defaults (lambda (vps ts)
+                   (map cons (map car vps) ts)) env vs ps #:fail-with fw))
+
+;; -----------------------------------------------
+;; Type inference for K3 constructs
+;; -----------------------------------------------
 
 (define/contract (ti-literal lit)
   (literal? . -> . TI/c)
@@ -804,11 +945,11 @@
   (define (return ss t) (->TI (cons ss t)))
   (nanopass-case (K3 Expr) e
     [,var
-     (do [sc <- (find-in-assumptions var as)]
+     (do [sc <- (find-in-assumptions var as #:fail-with fail/m)]
          [(qualified ps t) <- (fresh-inst sc)]
          (return ps t))]
     [,prim ;; Typecheck the same way a variable would be
-    (do [sc <- (find-in-assumptions prim as)]
+    (do [sc <- (find-in-assumptions prim as #:fail-with fail/m)]
         [(qualified ps t) <- (fresh-inst sc)]
       (return ps t))]
     [,lit (ti-literal lit)]
@@ -817,8 +958,8 @@
       (do [(qualified ps t) <- (fresh-inst scm)]
           (return ps t))]
     [(,e0 ,e1)
-     (do [(cons qs tf) <- (ti-expr env as e0)]
-         [(cons ps te) <- (ti-expr env as e1)]
+     (do [(cons ps te) <- (ti-expr env as e0)]
+         [(cons qs tf) <- (ti-expr env as e1)]
          [t <- (fresh-tv kind-star)]
          (unify ($make-func tf t) te)
          (return (append ps qs) t))]
@@ -833,10 +974,10 @@
                  core-assumptions
                  (with-output-language (K3 Expr)
                    `0)))
-  (<-TI (ti-expr core-environment
+  #;(<-TI (ti-expr core-environment
                  core-assumptions
                  (with-output-language (K3 Expr)
-                   `((#%int+ 0) 1)))))
+                   `((#%num+ 0) 1)))))
 
 (define (ti-alternative env as a)
   #;(tclass-env? (listof assumption?) alternative? . -> . TI/c)
@@ -894,27 +1035,28 @@
                   (null? pat)])) (list* alt0 alt*))]))
   (ormap simple? bs))
 
-
 ;; NOTE bs is a lsit of implicitly typed bindings,
 ;; howver, at the K3 level this is a `(df ...).
 (define (ti-implicit+ env as bs)
   #;(tclass-env? (listof assumption?) (listof implicit/c) . -> . TI/c)
+  (define _1 (printf "as: ~a\n" as))
   (do [ts <- (map/m (lambda _ (fresh-tv kind-star)) bs)]
-      (define is (map df-var bs))
-      (define scs (map type->scheme ts))
-      (define asp #;(map assumption is (append scs as))
-        (for/list ([i (in-list is)]
-                   [sc (in-list (append scs as))])
-          (assumption i sc)))
-      (define altss (map df-alts bs))
-      [pss <- (sequence/m (curry ti-alternative+ env asp) altss ts)]
+      (define/print is (map df-var bs))
+      (define/print scs (map type->scheme ts))
+      (define/print asp (append (map assumption is scs) as))
+      (define/print altss (map df-alts bs))
+      [pss <- (map/m values (map (curry ti-alternative+ env asp) altss ts))]
+      (define _0 (printf "pss: ~a\n" pss))
       [s <- (get-subst)]
-      (define psp (substitute s (concat pss)))
-      (define tsp (substitute s ts))
-      (define fs (get-type-vars (substitute s as)))
-      (define vss (map get-type-vars tsp))
-      (define gs (list-diff (foldr1 list-union vss) fs))
-      [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp)]
+      (define _ (printf "Current subst: ~a\n" s))
+      (define/print psp (substitute s (concat pss)))
+      (define/print tsp (substitute s ts))
+      (define/print fs (get-type-vars (substitute s as)))
+      (define/print vss (map get-type-vars tsp))
+      (define/print gs (list-diff (foldr1 list-union vss) fs))
+      [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp
+                              #:fail-with fail/m)]
+      (define _1 (printf "DS: ~a\nRS: ~a\n" ds rs))
       (if (restricted? bs)
           (let* ([gsp (list-diff gs (get-type-vars rs))]
                 [scsp (map (compose (curry quantify gsp)
@@ -924,9 +1066,29 @@
                                     (curry qualified rs)) tsp)])
             (->TI (cons ds (map assumption is scsp)))))))
 
+(module+ test
+  (<-TI (ti-implicit+
+         core-environment core-assumptions
+         (list (with-output-language (K3 Definition)
+                 `(bind main (() 0))))))
+  (<-TI (ti-implicit+
+         core-environment core-assumptions
+         (list (with-output-language (K3 Definition)
+                 `(bind main (() #%identity))))))
+  (<-TI (ti-implicit+
+         core-environment core-assumptions
+         (list (with-output-language (K3 Definition)
+                 `(bind main (() (#%identity 0)))))))
+  (<-TI (ti-implicit+
+         core-environment core-assumptions
+         (list (with-output-language (K3 Definition)
+                 `(bind main (() ((#%num+ 0) 1))))))))
+
 (define (ti-bind-group env as bg)
   #;(tclass-env? (listof assumption?) bind-group? . -> . TI/c)
   (match-define (bind-group es iss) bg)
+  (unless (null? es)
+    (error "INTERNAL: explicitly typed bindings unsupported"))
   (do (define asp '()
         #;(for/list ([e (in-list es)])
           (match-define (bg-explicit v scm alts) e)
@@ -936,53 +1098,28 @@
     (->TI (cons (append ps (concat qss))
                 (append aspp asp)))))
 
-(define/contract (split env fs gs ps)
-  (tclass-env? (listof type-variable?)
-               (listof type-variable?)
-               (listof predicate?)
-               . -> . monad?)
-  (do [psp <- (reduce env ps)]
+(define/contract (split env fs gs ps #:fail-with [fw error-format])
+  (->* (tclass-env? (listof type-variable?)
+                    (listof type-variable?)
+                    (listof predicate?))
+       (#:fail-with (fail-proc/c monad?)) monad?)
+  (do [psp <- (reduce env ps #:fail-with fw)]
       (define-values (ds rs)
-        (partition (compose (curryr member fs)
-                            get-type-vars) psp))
-      [rsp <- (default-predicates env (append fs gs) rs)]
+        (partition
+         (compose (curry andmap (curryr member fs))
+                  get-type-vars) psp))
+      [rsp <- (default-predicates env (append fs gs) rs
+                #:fail-with fw)]
       (->TI (cons ds (list-diff rs rsp)))))
 
-(define/contract (ambiguities env vs ps)
-  (tclass-env? (listof type-variable?)
-               (listof predicate?) . -> . (listof ambiguity?))
-  (for/list ([v (in-list (list-diff (get-type-vars ps) vs))])
-    (define preds (filter (compose (curry member v)
-                                   get-type-vars) ps))
-    (ambiguity v preds)))
-
-(define (default-candidates env amb)
-  ;; An ambiguity can be defaulted if it meets specific criteria. Currently, no
-  ;; ambiguities will be defaulted and must be specified by the programmer.
-  ;; These conditions are as follows:
-  ;; - All QS predicates are of the form: (predicate _ (type-variable _)).
-  ;; - One of the classes involved is a numeric class.
-  ;; - All classes involved are from the standard library.
-  ;; https://web.cecs.pdx.edu/~mpj/thih/TypingHaskellInHaskell.html#Haskell98
-  '())
-
-(define #;/contract (with-defaults f env vs ps)
-  #;(((listof ambiguity?) (listof type? . -> . any/c))
-   tclass-env? (listof type-variable?)
-   (listof predicate?)
-   . -> . (result/c any/c))
-  (define vps (ambiguities env vs ps))
-  (define tss (map (curry default-candidates env) vps))
-  (cond [(ormap null? tss) (failure "cannot resolve ambiguity")]
-        [else (success (f vps (map car tss)))]))
-
-(define (default-predicates env vs ps)
-  (with-defaults (lambda (vps ts)
-                   (concat (map cadr vps))) env vs ps))
-
-(define (default-subst env vs ps)
-  (with-defaults (lambda (vps ts)
-                   (map cons (map car vps) ts)) env vs ps))
+(module+ test
+  #;(<-TI (ti-bind-group
+         core-environment core-assumptions
+         (bind-group '()
+                     (list
+                      (list
+                       (with-output-language (K3 Definition)
+                         `(bind main (() ((#%num+ 0) 1))))))))))
 
 ;; TODO modify the compiler pipeline in `nanopass.rkt` to pass
 ;; this method an environment as well.
@@ -995,17 +1132,17 @@
        (define bgs (map (lambda (df*) (bind-group '() df*)) df))
        (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
            [s <- (get-subst)]
-           [rs <- (reduce env (substitute s ps))]
-           [sp <- (default-subst env '() rs)]
+           [rs <- (reduce env (substitute s ps) #:fail-with fail/m)]
+           [sp <- (default-subst env '() rs #:fail-with fail/m)]
            (->TI (substitute (sp . @@ . s) asp)))]))
   (<-TI (ti p)))
 
 (module+ test
-  (typecheck-K3
+  #;(typecheck-K3
    (with-output-language (K3 Program)
-     `((((bind main ((#%int+ 0) 1)))))))
+     `((((bind main (() ((#%num+ 0) 1))))))))
 
-  (typecheck-K3
+  #;(typecheck-K3
    (with-output-language (K3 Program)
      `((((bind id ((x) x)))
-        ((bind main ((#%int+ 0) 1))))))))
+        ((bind main (() ((#%num+ 0) (x 1))))))))))

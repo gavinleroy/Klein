@@ -16,108 +16,6 @@
  )
 
 ;; ------------------------------------------------
-;; Klein high-level language constructs
-;; TODO remove
-
-;; TODO expressions are currently a subset of what should be available in Klein.
-;; (struct expression ())
-;; (struct expr-var expression (id)
-;;   #:transparent #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'VarE)
-;;       (lambda (o) (list (expr-var-id o)))))])
-
-;; (struct expr-lit expression (lit)
-;;   #:transparent
-;;   #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'LitE)
-;;       (lambda (o) (list (expr-lit-lit o)))))])
-
-;; (struct expr-const expression (assumpt)
-;;   #:transparent
-;;   #:sealed)
-
-;; (struct expr-app expression (e1 e2)
-;;   #:transparent
-;;   #:sealed)
-
-;; (struct expr-let expression (bg e)
-;;   #:transparent
-;;   #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'LetE)
-;;       (lambda (o) (list (expr-let-bg o)
-;;                    (expr-let-e o)))))])
-
-;; ;; Patterns may occur on the left hand side of a function declaration. Here,
-;; ;; values may be destructured.
-;; ;; TODO support the full slew of patterns.
-;; (struct pattern ())
-;; (struct pat-id pattern (id)
-;;   #:transparent
-;;   #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'IdP)
-;;       (lambda (o) (list (pat-id-id o)))))])
-
-;; (struct pat-lit (lit)
-;;   #:transparent
-;;   #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'LitP)
-;;       (lambda (o) (list (pat-lit-lit o)))))])
-
-;; ;; An alternative is used to bind a list of function binding patterns (left hand sides)
-;; ;; to a cooresponding body expression (right hand side).
-;; (struct alternative (pats expr)
-;;   #:transparent
-;;   #:sealed
-;;   #:methods gen:custom-write
-;;   [(define write-proc
-;;      (make-constructor-style-printer
-;;       (lambda (o) 'Alt)
-;;       (lambda (o) (list (alternative-pats o)
-;;                    (alternative-expr o)))))])
-
-
-;; ;; For a given list of explicit bindings,
-;; ;;
-;; ;; Example: given a group of explicitly typed bindings `es`, impls would be a
-;; ;; list of implicitly typed bindings of the form `im_0, im_1, ..., im_n`. An
-;; ;; implicit bindings `im_i` should only depend on those bindings in es or `im_j`
-;; ;; such that `0 <= j && j < i`.
-;; (struct bg-explicit (id scm alts)
-;;   #:transparent
-;;   #:sealed)
-
-;; #;(define explicit/c
-;;   (struct/dc bg-explicit
-;;              [id ...]
-;;              [scm ...]
-;;              [alts ...]))
-
-;; (struct bg-implicit (id alts)
-;;   #:transparent
-;;   #:sealed)
-
-;; (define implicit/c
-;;   (struct/dc bg-implicit
-;;              [id symbol?]
-;;              [alts (listof alternative?)]))
-
-
-;; ------------------------------------------------
 ;; KleinS Base Language
 
 (define (literal? l)
@@ -141,7 +39,7 @@
 (define variable? symbol?)
 
 (define (primitive? p)
-  (memq p '(#%int+ #%float+)))
+  (memq p '(#%identity #%num+ #%num+)))
 
 ;; XXX the initial Klein `K_0` source language, this is expected to
 ;; change  but subsequent changes shouldn't be /too/ large.

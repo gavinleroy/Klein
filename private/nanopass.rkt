@@ -209,6 +209,11 @@
 ;; FIXME the entry of main and a module specification needs to
 ;; be better extended, but hopefully nothing too crazy changes.
 (define-pass transform-to-binding : K2 (ir) -> K3 ()
+  (definitions
+    (define (letrec? e)
+      (nanopass-case (K3 Expr) e
+        [(letrec ((,df* ...) ...) ,body) (cons 'letrec (cons df* body))]
+        [else (cons 'expr e)])))
   (Definition : Definition (ir) -> Definition ()
     [(variable ,var ,[e]) `(bind ,var (() ,e))]
     [(procedure ,var ,[alt] ,[alt*] ...)
@@ -223,10 +228,16 @@
   (Program : Program (ir) -> Program ()
     ;; If there exists previous binding forms at the top-level
     ;; we don't want to push them down
-    [`((letrec ((,[df] ...) ...) ,[body]))
+    ;; But the last expression (for now) needs to get pushed
+    ;; into a binding, here I'll call it "result" but really
+    ;; we need either no expr, or a main. XXX
+    [((letrec ((,[df] ...) ...) ,[body]))
     (define main (gensym 'result))
-    (define df* (list* df `((((bind ,main ,body))))))
-    `((((,df* ...) ...) ...))]))
+    (define df* (list* df (list `((((bind ,main (() ,body))))))))
+    `(((,df* ...) ...) ...)]
+    [(,[e])
+     (define main (gensym 'result))
+     `((((bind ,main (() ,e)))))]))
 
 ;; Typechecking pass sequestered in `typing.rkt`.
 #;(define-pass typecheck-K3 : K3 (ir) -> K3 () ...)
@@ -266,7 +277,7 @@
  (check-unbound-vars unparse-K1)
  (remove-empty-letrec unparse-K1)
  (refine-binding-groups unparse-K2)
- (curry-applications unparse-K3)
+ (transform-to-binding unparse-K3)
  (typecheck-K3 (lambda (v) v)))
 
 (module+ test
