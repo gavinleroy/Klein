@@ -3,7 +3,7 @@
 (require (for-syntax racket/base
                      syntax/parse
                      racket/syntax
-
+                     racket/bool
                      "utils.rkt")
          racket/bool
          racket/contract
@@ -25,9 +25,38 @@
          "languages.rkt"
          "utils.rkt")
 
-(provide typecheck-K3)
+(provide typecheck-K3
+         core-environment core-assumptions
+         empty-environment empty-assumptions)
 
-(module+ test (require rackunit))
+(module+ test
+  (require rackunit)
+  (define-syntax (check-success? stx)
+    (syntax-parse stx
+      [(_ f:expr s:expr) #'(check-equal? f (success s))]))
+  (define-syntax (check-fail? stx)
+    (syntax-parse stx
+      [(_ f:expr) #'(let ([v f]) (check-pred failure? v))]))
+  (define-syntax (check-typed-prog? stx)
+    (syntax-parse stx
+      [(_ (~optional (~seq #:run-from stage:expr))
+          (~optional (~seq #:unwrap-value uwrp:expr #:value-equal? val:expr))
+          (~optional #:use-core) ;; include the core-env/ass
+          args ...)
+       (with-syntax ([run-state (if (attribute stage)
+                                    #'stage
+                                    #'#%typecheck-K3)]
+                     [inner-pred? (if (attribute val)
+                                      #'(lambda (v) (equal? val (success (uwrp v))))
+                                      #'success?)])
+         #;(unless (= (length (syntax->list #'args))
+                    (procedure-arity (syntax->datum #'run-state)))
+           (raise-syntax-error 'check-typed-prog?
+                               "Incorrect arguments for stage"
+                               run-state))
+         #'(check-pred inner-pred?
+                       (<-TI (run-state args ...))))])))
+
 
 ;; TODO FIXME REMOVE
 (define-syntax (define/print stx)
@@ -267,13 +296,6 @@
   (apply append lss))
 
 (module+ test
-  (define-syntax (check-success? stx)
-    (syntax-parse stx
-      [(_ f:expr s:expr) #'(check-equal? f (success s))]))
-  (define-syntax (check-fail? stx)
-    (syntax-parse stx
-      [(_ f:expr) #'(let ([v f]) (check-pred failure? v))]))
-
   (define (push-state e)
     (TI (lambda (s)
           (cons (struct-copy state s
@@ -477,7 +499,6 @@
 
 (define/contract (type-match/predicate p1 p2)
   (predicate? predicate? . -> . (result/c subst/c))
-  (printf "Matching preds:\n~a\n~a\n\n" p1 p2)
   (lift-unifier (curry type-match
                        #:fail-with failure-format) p1 p2))
 
@@ -573,7 +594,7 @@
   (define a-ty (type-variable 'a0 kind-star))
   (define b-ty (type-variable 'b0 kind-star))
   (define fishy-env
-    (%extend-environment empty-env
+    (%extend-environment empty-environment
                          (env-add-class 'Fish '())
                          (env-add-class 'BlueFish '(Fish))
                          (env-add-class 'RedFish '(Fish))
@@ -589,15 +610,13 @@
                 (predicate 'Fish %unit))
   (check-equal? (qualified '() (predicate 'Fish %unit))
                 (qualified '() (predicate 'Fish %unit)))
-
   (check-list-eqv? (env-super fishy-env 'Fish) '())
   (check-list-eqv? (env-super fishy-env 'BlueFish) '(Fish))
   (check-list-eqv? (env-super fishy-env 'RedFish) '(Fish))
   (check-list-eqv? (env-super fishy-env 'PurpleFish) '(RedFish BlueFish))
   (check-list-eqv? (env-super fishy-env 'HungryFish) '(PurpleFish))
   (check-list-eqv? (env-insts fishy-env 'Fish)
-                   (list (qualified '() (predicate 'Fish %unit))))
-  )
+                   (list (qualified '() (predicate 'Fish %unit)))))
 
 (define/contract (by-super env p)
   (tclass-env? predicate? . -> . (listof predicate?))
@@ -614,7 +633,6 @@
     (match-define (qualified ps h) ql)
     (do [u <- (type-match/predicate h p)]
         (success (map (curry substitute u) ps))))
-  (printf "Current insts of '~a : ~a\n" i (env-insts env i))
   (define ll (map try-inst (env-insts env i)))
   (define ls (filter success? ll))
   (if (null? ls)
@@ -636,7 +654,6 @@
 
 (define/contract (head-normal-form? prd)
   (predicate? . -> . boolean?)
-  (printf "HNF? ~a\n" prd)
   (define (r v)
     (cond [(type-variable? v) #true]
           [(type-const? v) #false]
@@ -651,14 +668,11 @@
 
 (define/contract (->head-normal-form env p #:fail-with [fw error-format])
   (->* (tclass-env? predicate?) (#:fail-with (fail-proc/c monad?)) monad?)
-  (printf "->HNF ~a\n" p)
-  (cond [(head-normal-form? p) (->TI (list p))]
-        [else
-         (begin
-           (printf "BY INST: ~a in ~a\n" env p)
-         (match (by-inst env p)
-                [(failure msg) (fw "Context reduction: ~s" msg)]
-                [(success ps) (->head-normal-form+ env ps #:fail-with fw)]))]))
+  (if (head-normal-form? p)
+      (->TI (list p))
+      (match (by-inst env p)
+        [(failure msg) (fw "Context reduction: ~s" msg)]
+        [(success ps) (->head-normal-form+ env ps #:fail-with fw)])))
 
 (define/contract (simplify env ps)
   (tclass-env? (listof predicate?) . -> . (listof predicate?))
@@ -694,7 +708,6 @@
 (define/contract (find-in-assumptions id as #:fail-with [fw error-format])
   (->* (symbol? (listof assumption?))
        (#:fail-with (fail-proc/c monad?)) monad?)
-  (printf "Searching in Assumptions: ~a\n" as)
   (match as
     [(list) (fw "unbound identifier: ~a" id)]
     [(list (assumption i ts) as ...)
@@ -754,7 +767,7 @@
 ;; [ ] explicit types / classes allowed in parsing K0
 ;; -----------------------------------------------
 
-(define empty-env
+(define empty-environment
   (tclass-env
    (lambda (id) (failure-format "Identifier '~a unbound in class environment" id ))
    (list %int %float)))
@@ -815,7 +828,7 @@
            env+core-classes))
 
 (define core-environment
-  (env+pervasives empty-env))
+  (env+pervasives empty-environment))
 
 (define empty-assumptions '())
 
@@ -898,9 +911,11 @@
 (module+ test
   (define (ti-value p)
     (match p [(success (cons _ v)) (success v)] [o o]))
-  (check-success? (ti-value (<-TI (ti-literal #\U))) %char)
-  #;(check-fail? (<-TI (ti-literal "strings unsupported")))
-  (<-TI (ti-literal 100)))
+  (check-typed-prog? #:run-from ti-literal
+                     ;; #:unwrap-value ti-value
+                     ;; #:value-equal? %char
+                     #\U)
+  (check-typed-prog? #:run-from ti-literal 100))
 
 (define (ti-pattern p)
   (nanopass-case (K3 Pattern) p
@@ -970,14 +985,17 @@
          (return (append ps qs) t))]))
 
 (module+ test
-  (<-TI (ti-expr core-environment
-                 core-assumptions
-                 (with-output-language (K3 Expr)
-                   `0)))
-  #;(<-TI (ti-expr core-environment
-                 core-assumptions
-                 (with-output-language (K3 Expr)
-                   `((#%num+ 0) 1)))))
+  (check-typed-prog?
+   #:run-from ti-expr
+   core-environment core-assumptions
+   (with-output-language (K3 Expr)
+     `0))
+
+  (check-typed-prog?
+   #:run-from ti-expr
+   core-environment core-assumptions
+   (with-output-language (K3 Expr)
+     `((#%num+ 0) 1))))
 
 (define (ti-alternative env as a)
   #;(tclass-env? (listof assumption?) alternative? . -> . TI/c)
@@ -1039,24 +1057,20 @@
 ;; howver, at the K3 level this is a `(df ...).
 (define (ti-implicit+ env as bs)
   #;(tclass-env? (listof assumption?) (listof implicit/c) . -> . TI/c)
-  (define _1 (printf "as: ~a\n" as))
   (do [ts <- (map/m (lambda _ (fresh-tv kind-star)) bs)]
-      (define/print is (map df-var bs))
-      (define/print scs (map type->scheme ts))
-      (define/print asp (append (map assumption is scs) as))
-      (define/print altss (map df-alts bs))
+      (define is (map df-var bs))
+      (define scs (map type->scheme ts))
+      (define asp (append (map assumption is scs) as))
+      (define altss (map df-alts bs))
       [pss <- (map/m values (map (curry ti-alternative+ env asp) altss ts))]
-      (define _0 (printf "pss: ~a\n" pss))
       [s <- (get-subst)]
-      (define _ (printf "Current subst: ~a\n" s))
-      (define/print psp (substitute s (concat pss)))
-      (define/print tsp (substitute s ts))
-      (define/print fs (get-type-vars (substitute s as)))
-      (define/print vss (map get-type-vars tsp))
-      (define/print gs (list-diff (foldr1 list-union vss) fs))
+      (define psp (substitute s (concat pss)))
+      (define tsp (substitute s ts))
+      (define fs (get-type-vars (substitute s as)))
+      (define vss (map get-type-vars tsp))
+      (define gs (list-diff (foldr1 list-union vss) fs))
       [(cons ds rs) <- (split env fs (foldr1 list-intersect vss) psp
                               #:fail-with fail/m)]
-      (define _1 (printf "DS: ~a\nRS: ~a\n" ds rs))
       (if (restricted? bs)
           (let* ([gsp (list-diff gs (get-type-vars rs))]
                 [scsp (map (compose (curry quantify gsp)
@@ -1067,22 +1081,29 @@
             (->TI (cons ds (map assumption is scsp)))))))
 
 (module+ test
-  (<-TI (ti-implicit+
-         core-environment core-assumptions
-         (list (with-output-language (K3 Definition)
-                 `(bind main (() 0))))))
-  (<-TI (ti-implicit+
-         core-environment core-assumptions
-         (list (with-output-language (K3 Definition)
-                 `(bind main (() #%identity))))))
-  (<-TI (ti-implicit+
-         core-environment core-assumptions
-         (list (with-output-language (K3 Definition)
-                 `(bind main (() (#%identity 0)))))))
-  (<-TI (ti-implicit+
-         core-environment core-assumptions
-         (list (with-output-language (K3 Definition)
-                 `(bind main (() ((#%num+ 0) 1))))))))
+  (check-typed-prog?
+   #:run-from ti-implicit+
+   core-environment core-assumptions
+   (list (with-output-language (K3 Definition)
+           `(bind main (() 0)))))
+
+  (check-typed-prog?
+   #:run-from ti-implicit+
+   core-environment core-assumptions
+   (list (with-output-language (K3 Definition)
+           `(bind main (() #%identity)))))
+
+  (check-typed-prog?
+   #:run-from ti-implicit+
+   core-environment core-assumptions
+   (list (with-output-language (K3 Definition)
+           `(bind main (() (#%identity 0))))))
+
+  (check-typed-prog?
+   #:run-from ti-implicit+
+   core-environment core-assumptions
+   (list (with-output-language (K3 Definition)
+           `(bind main (() ((#%num+ 0) 1)))))))
 
 (define (ti-bind-group env as bg)
   #;(tclass-env? (listof assumption?) bind-group? . -> . TI/c)
@@ -1113,36 +1134,42 @@
       (->TI (cons ds (list-diff rs rsp)))))
 
 (module+ test
-  #;(<-TI (ti-bind-group
-         core-environment core-assumptions
-         (bind-group '()
-                     (list
-                      (list
-                       (with-output-language (K3 Definition)
-                         `(bind main (() ((#%num+ 0) 1))))))))))
+  (check-typed-prog?
+   #:run-from ti-bind-group
+   core-environment core-assumptions
+   (bind-group '()
+               (list
+                (list
+                 (with-output-language (K3 Definition)
+                   `(bind main (() ((#%num+ 0) 1)))))))))
 
-;; TODO modify the compiler pipeline in `nanopass.rkt` to pass
-;; this method an environment as well.
-(define (typecheck-K3 p)
-  (define env core-environment)
-  (define as core-assumptions)
-  (define (ti p)
-    (nanopass-case (K3 Program) p
-      [(((,df ...) ...) ...)
-       (define bgs (map (lambda (df*) (bind-group '() df*)) df))
-       (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
-           [s <- (get-subst)]
-           [rs <- (reduce env (substitute s ps) #:fail-with fail/m)]
-           [sp <- (default-subst env '() rs #:fail-with fail/m)]
-           (->TI (substitute (sp . @@ . s) asp)))]))
-  (<-TI (ti p)))
+(define (#%typecheck-K3 env as p)
+  (nanopass-case (K3 Program) p
+                 [(((,df ...) ...) ...)
+                  (define bgs (map (lambda (df*) (bind-group '() df*)) df))
+                  (do [(cons ps asp) <- (ti-seq ti-bind-group env as bgs)]
+                      [s <- (get-subst)]
+                      [rs <- (reduce env (substitute s ps) #:fail-with fail/m)]
+                      [sp <- (default-subst env '() rs #:fail-with fail/m)]
+                      (->TI (substitute (sp . @@ . s) asp)))]))
 
-(module+ test
-  #;(typecheck-K3
+;; TODO This pass should output a language K4 which has explicit type information added
+;; to each construcut. This will need a few tweaks, for now, just fail and output
+;; the same language.
+(define (typecheck-K3 env as p)
+  (match (<-TI (#%typecheck-K3 env as p))
+    [(success asps) p]
+    [(failure msg)
+     (error "Failed to typecheck" msg)]))
+
+#;(module+ test
+  (check-typed-prog?
+   core-environment core-assumptions
    (with-output-language (K3 Program)
      `((((bind main (() ((#%num+ 0) 1))))))))
 
-  #;(typecheck-K3
+  (typecheck-K3
+   core-environment core-assumptions
    (with-output-language (K3 Program)
      `((((bind id ((x) x)))
         ((bind main (() ((#%num+ 0) (x 1))))))))))
